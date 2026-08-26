@@ -161,6 +161,10 @@ terms:
     variants: [Dojo]
 
   # --- Domain vocabulary observed 2026-08-25 ---------------------------------
+  - term: Okta
+    tier: correct
+    # 'Octa' and 'Octo' both observed in the 2026-08-26 transcript.
+    variants: [Octa, Octo]
   - term: OpenSearch
     tier: correct
     variants: [Open Search, OpenSearch shader]

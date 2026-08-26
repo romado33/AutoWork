@@ -86,8 +86,13 @@ function Invoke-Pipeline {
         # Output is captured to a dated log: a watcher that fails silently is worse
         # than no watcher, and there is no console attached when run as a task.
         $log = Join-Path $LogDir ("run-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-        & $Python "tools\run_pipeline.py" "--serial" $Serial "-v" *>&1 |
-            Tee-Object -FilePath $log
+        # Launched via cmd /c with file redirection, NOT a PowerShell pipeline. In
+        # Windows PowerShell 5.1, redirecting a native command's stderr (*>&1) wraps
+        # each line in an ErrorRecord, and under $ErrorActionPreference = "Stop" the
+        # first INFO log line -- Python logging writes to stderr -- killed this watcher
+        # mid-run twice. Measured, not hypothetical: ingest completed, transcription
+        # never started, task exited 1 with no run log at all.
+        cmd /c "`"$Python`" -u tools\run_pipeline.py --serial $Serial -v > `"$log`" 2>&1"
         Write-Log "pipeline exited $LASTEXITCODE (log: $log)"
     }
     finally { Pop-Location }
@@ -100,7 +105,10 @@ Write-Log "watcher started (serial $Serial, project $ProjectDir)"
 # before this process existed and will not be replayed.
 if (Get-RecorderDrive) {
     Write-Log "recorder already attached at startup"
-    Invoke-Pipeline
+    # try/catch here as well as in the event loop: a throw on the startup path killed
+    # the watcher with no log line saying why. A dead watcher must always say so.
+    try { Invoke-Pipeline }
+    catch { Write-Log "pipeline error at startup: $($_.Exception.Message)" }
     if ($Once) { return }
 }
 

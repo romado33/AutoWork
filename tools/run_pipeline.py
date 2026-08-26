@@ -218,7 +218,25 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(f"ingest: {len(result.copied)} new, {len(result.skipped)} already present "
               f"({result.copied_bytes / 1e6:.1f} MB copied)")
-        paths = result.copied
+        paths = list(result.copied)
+
+        # Crash recovery: also pick up files recorded TODAY that have no transcript.
+        # Measured gap: a run ingested a recording and then died; the ledger correctly
+        # skipped the copy on the next run, so "copied this run" was empty and the
+        # recording sat untranscribed forever. Restricted to today's date (from the
+        # filename) so a fresh setup can never bulk-bill the months of old audio the
+        # recorder keeps; older gaps are recovered explicitly with --files.
+        today = datetime.now().strftime("%Y-%m-%d")
+        for candidate in sorted(audio_dir.glob("*.MP3")) + sorted(audio_dir.glob("*.mp3")):
+            stem = candidate.stem
+            if (
+                len(stem) >= 11
+                and stem[1:11] == today
+                and not (transcript_dir / f"{stem}.md").exists()
+                and candidate not in paths
+            ):
+                print(f"recovering unprocessed recording from today: {candidate.name}")
+                paths.append(candidate)
 
     if not paths:
         print("nothing new to process")
