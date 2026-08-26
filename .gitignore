@@ -1,0 +1,24 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Recordings, transcripts, outputs: TrueContext-confidential, never committed
+audio/
+RECORD/
+*.MP3
+*.mp3
+transcripts/
+summaries/
+digests/
+queue.sqlite3
+
+# Runtime
+logs/
+*.log
+work/
+stage/
+models/
+.venv/
+__pycache__/
+.pytest_cache/

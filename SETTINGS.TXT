@@ -1,0 +1,33 @@
+TIME:18:51 08/23/2026
+#You may change the date and time here.
+#Format(US):TIME:HH:MM MM/DD/YYYY
+# Note: The updated time will apply only to recordings made after this change.
+
+VOICE ACTIVATED RECORDING:On
+#Change to "On" to enable voice-activated recording.
+#Change to "Off" to enable continuous recording.
+#Available values:On / Off
+
+BIT:3
+#Set recording quality here.
+#Choose a number from 1 to 7:
+#1=32kbps(MP3)
+#2=64kbps(MP3)
+#3=128kbps(MP3)Recommended (balanced quality & size)
+#4=256kbps(WAV)
+#5=512kbps(WAV)
+#6=768kbps(WAV)
+#7=1536kbps(WAV)Highest quality, largest file size
+
+VOR SOUND THRESHOLD:55
+#  Set the sound level that triggers recording (only works when
+#"VOICE ACTIVATED RECORDING" is set to On).
+#Available values:
+#45=More sensitive(records quieter sounds)
+#50=Normal setting(recommended)
+#55=Less sensitive(reduces unwanted recordings)
+
+DENOISE:1
+# Set Noise Reduction
+# 0-OFF
+# 1-ON                                                                                         

@@ -1,0 +1,65 @@
+# AutoWork — project rules
+
+Pocket voice recorder -> ingest by volume serial -> audio quality gate -> cloud
+transcription with diarization -> relevance gate -> summary email + grounded action
+items in a human review queue. Python 3.11+, three deps (openai, PyYAML, pytest),
+ffmpeg required. Run tests: `python -m pytest tests -q` (172 passing; keep it that way).
+
+## Safety invariants — never weaken these
+
+1. NOTHING here executes action items. They land in the review queue as PENDING;
+   `dispatch()` refuses anything not APPROVED by a human. Plugging in a USB stick must
+   not be able to write to Jira.
+2. Every extracted action and every decision carries a VERBATIM grounding quote that is
+   string-matched against the source transcript. Unverified = labelled, never silently
+   dropped or silently trusted.
+3. The audio gate runs on RAW audio only. Enhancement inflates its metric without
+   adding intelligibility (measured with Demucs: metric +4 dB, transcript still garbage).
+4. Metadata (date, duration, speaker count) is DERIVED from files and the diarizer,
+   never model-generated. A wrong date on a work summary is worse than none.
+5. Never log or print credentials, and never commit .env, audio, transcripts or
+   summaries — they contain TrueContext-confidential conversation content.
+
+## Measured facts — do not re-litigate without new measurements
+
+- Whisper on low-signal audio FABRICATES fluent text ("*Police*" x6, "city of
+  Estrella" x14). That is why the gate exists: speech_db >= -32 AND
+  (speech - rumble) >= +1 dB, calibrated in tests/test_gate.py against samples whose
+  transcripts were read. Do not change thresholds without new labelled samples.
+- Local LLM extraction was tried and removed: gemma3:4b 358s for 1/3 items,
+  qwen2.5:7b 493s for 0/3, phi4 never finished. gpt-5.4-mini: ~7s, 3/3. Do not
+  suggest reintroducing local inference on this hardware.
+- 16 kHz mono 32 kbps MP3 transcribes within noise of the original (Whisper resamples
+  to 16 kHz internally; the recorder's channels are bit-identical). Opus 20k degrades.
+- Diarization speaker labels are PER REQUEST: chunk 1's "A" is not chunk 2's "A".
+  Never union labels across uploads (it reported 4 speakers on a 2-person call);
+  take the max within one chunk.
+- Action identity = normalised grounding quote (+ similarity >= 0.75), NOT the title.
+  Titles are reworded on every model run; quotes are stable.
+- Prompt/threshold changes must be checked against known-outcome data before shipping.
+  Ground truth so far: transcripts/ + KNOWN_ITEMS in tools/compare_backends.py.
+
+## Environment gotchas that actually bit this project
+
+- Windows PowerShell 5.1: redirected native stderr (*>&1) becomes ErrorRecords and
+  KILLS the script under $ErrorActionPreference=Stop. Python logging writes to stderr.
+  Launch Python from PS via `cmd /c "... > log 2>&1"` (see scripts/Watch-Recorder.ps1).
+- Tee-Object writes UTF-16; use Add-Content -Encoding UTF8.
+- $PSScriptRoot is empty in param-block defaults under -File; compute in the body.
+- Shell-heredoc patching of Python files silently ate backslashes twice, turning \b
+  regex word boundaries into backspace chars that match nothing. prefilter.py asserts
+  against this at import; prefer direct file edits over heredoc patch scripts.
+- Ollama models write INFO logs mid-request; an empty transcription result is data
+  ("no speech"), not an error — one empty 15s segment must not abort a 23-min file.
+
+## Conventions
+
+- Config in .env (loaded by autowork/llm.py:load_dotenv), never in source.
+- The LLM provider is a config string ("openai:gpt-5.4-mini"); no vendor may become
+  load-bearing. Executors live behind autowork/executors/base.py.
+- The summary prompt is operator-editable at config/prompts/summary.txt; the schema
+  and quote-grounding stay in code so a pasted prompt cannot weaken them.
+- The glossary (config/glossary.yml) is the accuracy flywheel: every observed
+  mistranscription becomes a variant. Comments in files explain measured WHY, not what.
+- Every functional change updates tests or states why none is needed. Failure-mode
+  tests quote the verbatim strings from real incidents.

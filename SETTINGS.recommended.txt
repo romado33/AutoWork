@@ -1,0 +1,60 @@
+TIME:09:00 08/26/2026
+#You may change the date and time here.
+#Format(US):TIME:HH:MM MM/DD/YYYY
+# Note: The updated time will apply only to recordings made after this change.
+# CHANGED: set this accurately before the next session. Filenames are the only
+# timeline anchor you have, so clock drift breaks correlating a conversation to a
+# calendar entry.
+
+VOICE ACTIVATED RECORDING:Off
+#Change to "On" to enable voice-activated recording.
+#Change to "Off" to enable continuous recording.
+#Available values:On / Off
+# CHANGED On -> Off. VOR gates on TOTAL sound level, and pocket audio is
+# rumble-dominated (sub-300Hz cloth/body noise measured at or above the speech
+# band). So it triggers on fabric friction and cuts out during quiet speech --
+# it is discarding the wrong things. Measured: 09:16:28 -> 10:46:06 wall clock
+# produced 60 min of audio, so ~30 min was gated out, and 64% of what it KEPT
+# was still unusable. At 128kbps you get ~75h on a 128GB card, so there is no
+# space reason to gate. Continuous also preserves timeline continuity.
+
+BIT:3
+#Set recording quality here.
+#Choose a number from 1 to 7:
+#1=32kbps(MP3)
+#2=64kbps(MP3)
+#3=128kbps(MP3)Recommended (balanced quality & size)
+#4=256kbps(WAV)
+#5=512kbps(WAV)
+#6=768kbps(WAV)
+#7=1536kbps(WAV)Highest quality, largest file size
+# UNCHANGED, deliberately. This is NOT the bottleneck. The device captures at a
+# 16kHz sample rate, which caps usable bandwidth at 8kHz no matter what bitrate
+# you pick, and 128kbps MP3 is already transparent for 16kHz speech. Moving to
+# WAV cannot recover consonants that fabric already filtered out; it would only
+# add a variable while we are still diagnosing. Revisit only if placement plus
+# denoise-off still falls short.
+
+VOR SOUND THRESHOLD:45
+#  Set the sound level that triggers recording (only works when
+#"VOICE ACTIVATED RECORDING" is set to On).
+#Available values:
+#45=More sensitive(records quieter sounds)
+#50=Normal setting(recommended)
+#55=Less sensitive(reduces unwanted recordings)
+# CHANGED 55 -> 45, but MOOT while VOR is Off. Kept correct in case you turn VOR
+# back on. 55 ("less sensitive") was backwards: speech is arriving 10-15 dB too
+# quiet already, so a less-sensitive gate suppresses exactly the material you
+# need.
+
+DENOISE:0
+# Set Noise Reduction
+# 0-OFF
+# 1-ON
+# CHANGED 1 -> 0, and this one is a HYPOTHESIS I have not yet measured, not a
+# finding. Reasoning: the >3400Hz band measured -50 to -60 dB across these
+# recordings, which is extreme rolloff. Fabric explains some of it, but on-device
+# "AI noise reduction" is spectral subtraction tuned for steady background hiss,
+# and with low-level smeared speech it plausibly strips consonant energy along
+# with the noise. Consonants are what Whisper needs. Worth an explicit A/B --
+# see the test protocol below -- rather than taking my word for it.

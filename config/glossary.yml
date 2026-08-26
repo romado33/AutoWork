@@ -1,0 +1,208 @@
+# Glossary — seeded example. Fill in the TODO sections; everything here is editable.
+#
+# TWO TIERS, because Whisper's decode-time prompt is capped at ~224 tokens and a real
+# glossary will not fit:
+#
+#   tier: prompt   Injected into `sona transcribe --prompt`. Biases decoding, so it can
+#                  fix a word Whisper never had a chance to get right. Budget is tight
+#                  (~30 terms). Reserve it for terms that are FREQUENT and that Whisper
+#                  reliably mangles. Measured example: "Claude" -> "Clark".
+#
+#   tier: correct  Applied after transcription as a text-correction pass against the
+#                  full list. Unbounded, so put everything else here. Cannot recover a
+#                  word that was acoustically lost, but fixes near-misses cheaply.
+#
+# WARNING, measured and not theoretical: the prompt tier makes low-signal audio WORSE.
+# On a segment below +1 dB speech-minus-rumble, priming Whisper with this vocabulary
+# made it hallucinate these terms instead of random ones, and produced a repetition
+# loop it did not produce unprompted. The prompt tier must only ever be applied to
+# segments that clear the audio quality gate. The correct tier is safe anywhere.
+#
+# `variants` are the misrecognitions actually observed. Add to them as you review;
+# that is the cheapest accuracy win available and it compounds.
+
+terms:
+  # --- People (TODO: add colleagues you talk about by name) -------------------
+  - term: Rob Dods
+    tier: prompt
+    variants: []
+  - term: Dan
+    tier: prompt
+    variants: []
+  - term: Dave Casal
+    tier: correct
+    variants: [Dave Cazale, Dave Casali, Dave Cotel, Dave Casal, Dave Cazal, Casal, Cazal]
+  - term: Andrew
+    tier: correct
+    variants: []
+  # - term: <colleague>
+  #   tier: prompt
+  #   variants: [<what Whisper heard instead>]
+
+  # --- AI / tooling ----------------------------------------------------------
+  - term: Claude
+    tier: prompt
+    # 'quad' observed in the 2026-08-25 transcript: "quad should be
+    # considering the name of the field". A domain bet, like 'forums'.
+    variants: [Clark, Cloud, Claud, Clode, quad, Claudia]
+  - term: Claude Code
+    tier: prompt
+    variants: [Cloud Code, Clark Code]
+  - term: Ollama
+    tier: correct
+    variants: [Olama, O-Lama, Alama]
+  - term: Whisper
+    tier: correct
+    variants: []
+
+  # --- TrueContext product ---------------------------------------------------
+  - term: TrueContext
+    tier: prompt
+    variants: [True Context, TrueContacts, Tru Context]
+  - term: PES
+    tier: prompt
+    variants: [P.E.S., PSS, peas]
+  - term: ProntoForms
+    tier: correct
+    variants: [Pronto Forms, Pronto Form]
+  - term: dispatch
+    tier: correct
+    variants: []
+  - term: forms
+    tier: correct
+    # Observed in the 2026-08-25 transcript: "forums that had work history".
+    # "forums" is a real English word, so this rewrite is a domain bet: in this
+    # corpus it is effectively always "forms". Remove the variant if that stops
+    # being true.
+    variants: [forums]
+  - term: form space
+    tier: correct
+    variants: [formspace, form-space]
+  - term: data source
+    tier: correct
+    variants: []
+  - term: destination
+    tier: correct
+    variants: []
+  - term: form definition
+    tier: correct
+    variants: []
+  - term: conditional logic
+    tier: correct
+    variants: [condition logic]
+
+  # --- Customer Intelligence -------------------------------------------------
+  - term: Customer Intelligence Tool
+    tier: prompt
+    variants: [personal intelligence tool, customer intelligent tool]
+  - term: CIT
+    tier: prompt
+    variants: [C.I.T., sit, kit]
+  - term: opportunity
+    tier: prompt
+    variants: []
+  - term: signal
+    tier: correct
+    variants: []
+  - term: Chorus
+    tier: correct
+    variants: [chorus, Corus, Coris]
+  - term: Gong
+    tier: correct
+    variants: [gong, Gone]
+
+  # --- Backlog / planning ----------------------------------------------------
+  - term: backlog
+    tier: prompt
+    variants: []
+  - term: epic
+    tier: prompt
+    variants: []
+  - term: WSJF
+    tier: correct
+    variants: [W.S.J.F., wisjif, whiskey jeff]
+  - term: Jira
+    tier: prompt
+    variants: [Jeera, Gyra, Jera]
+  - term: Salesforce
+    tier: prompt
+    variants: [Sales Force]
+  - term: Confluence
+    tier: correct
+    variants: []
+  - term: ARR
+    tier: correct
+    variants: [A.R.R., are are]
+  - term: reach
+    tier: correct
+    variants: []
+
+  # --- Docs ------------------------------------------------------------------
+  - term: MadCap Flare
+    tier: prompt
+    variants: [Mad Cap Flare, Madcap Flair, Mad Cap Flair, Mad Cat Flare, MadCap Flair]
+  - term: topic
+    tier: correct
+    variants: []
+
+  # --- Accounts (observed 2026-08-25; add the rest as they come up) ----------
+  - term: Coterra
+    tier: correct
+    variants: [Cotara, Katera]
+  - term: Tesco
+    tier: correct
+    variants: []
+  - term: Carter Lumber
+    tier: correct
+    variants: [Carter Lumbar]
+  - term: Gojo
+    tier: correct
+    # Transcribed inconsistently as both "Gojo" and "Dojo" in the same conversation.
+    variants: [Dojo]
+
+  # --- Domain vocabulary observed 2026-08-25 ---------------------------------
+  - term: OpenSearch
+    tier: correct
+    variants: [Open Search, OpenSearch shader]
+  - term: entity mapping
+    tier: correct
+    variants: []
+  - term: asset
+    tier: correct
+    # 'site and acid' observed in a cloud transcript for 'site and asset'.
+    variants: [acid]
+  - term: work order
+    tier: correct
+    variants: []
+  - term: picklist
+    tier: correct
+    variants: [picolus, pick list, picklists]
+  - term: semantic type
+    tier: correct
+    variants: []
+  - term: API
+    tier: correct
+    variants: []
+  - term: ID
+    tier: correct
+    variants: [IDs]
+  - term: VIN
+    tier: correct
+    variants: []
+  - term: LLM
+    tier: correct
+    variants: []
+  - term: SFDC
+    tier: correct
+    variants: [SFPC]
+  - term: dropdown
+    tier: correct
+    variants: [drop down]
+  - term: submission
+    tier: correct
+    variants: []
+
+# Terms the correction pass could not resolve get written here for you to name.
+# This is the "ask me to clarify" loop: review them, promote the real ones into
+# `terms` above, and the extractor stops guessing at them.
+unresolved: []
