@@ -25,7 +25,8 @@ recorder --> ingest --> AUDIO GATE --> slice+compress --> transcribe (cloud)
 scripts\setup.bat            :: once: venv, dependencies, self-test
 notepad .env                 :: add OPENAI_API_KEY and your Gmail app password
 scripts\run.bat              :: plug in the recorder, then run
-scripts\review.bat           :: approve or reject what it found
+scripts\review-ui.bat        :: browser: review and mark to-dos done
+scripts\review.bat           :: same thing in the terminal
 ```
 
 To make it automatic on every login:
@@ -106,7 +107,22 @@ resamples there internally. Opus at 20 kbps genuinely degraded and is not used.
 
 ## What is automated and what is not
 
-Ingest, gating, transcription, summarising, extraction and the email all run unattended.
+Ingest, gating, transcription, summarising, extraction and the emails all run unattended.
+
+USB plug-in sends **one email per conversation**. A conversation is one recording,
+or several recordings that overlap the **same Outlook meeting** (same start + title).
+Similar-sounding topics are not merged -- that is how a mapping call and an Okta
+call were once mailed as one meeting.
+
+Outstanding actions that are still pending or approved (not yet done) go out in a
+**separate weekday 7:30am digest**. Open `scripts\review-ui.bat` and click
+**Mark done** -- no executor runs. The terminal equivalent is
+`scripts\review.bat --done <id>`.
+
+If Outlook is installed and signed in, an overlapping calendar event supplies the
+meeting title and invitees as derived metadata, labelled "from calendar". Zero or
+two-plus overlapping events: those fields are omitted rather than guessed. Diarization
+labels A/B are never mapped onto invitees.
 
 **Action items are never executed.** They land in the review queue as `pending`, and
 `dispatch()` refuses anything that is not `approved`. Plugging in a USB stick must not be
@@ -122,14 +138,18 @@ autowork/
   glossary.py         two-tier domain glossary, self-improving
   prefilter.py        commitment-language selection (cuts extraction volume ~4x)
   extract.py          transcript -> grounded ActionRecords
-  summarize.py        transcript -> daily summary
+  summarize.py        transcript -> conversation summary
+  conversations.py    group recordings only when they share an Outlook event
+  digest.py           morning outstanding-queue email (no model)
+  day.py              per-recording sidecar; rebuilds a date, not a plug-in
+  calendar_lookup.py  Outlook invitees as derived metadata (optional)
   action.py           the ActionRecord contract (vendor-neutral)
   queue.py            SQLite review queue, enforced state machine
   executors/          the execution boundary; only APPROVED dispatches
   llm.py              swappable backends (OpenAI, Anthropic)
   mailer.py           Gmail SMTP
   ingest.py           copy from the recorder by volume serial
-tools/                CLIs for each stage
+tools/                CLIs for each stage, plus the localhost review UI
 scripts/              .bat entry points, USB watcher, task installer
 config/glossary.yml   domain terms; add names as they come up
 ```
@@ -144,9 +164,10 @@ Two tiers, because a decode-time prompt is capped at ~224 tokens:
 - `tier: correct` is applied to finished text. Unbounded. Fixes near-misses like
   "forums" to "forms".
 
-Each transcript ends with a **Terms to clarify** list: repeated capitalised words the
-glossary does not know. Skim it and promote the real names. That is the loop that makes
-accuracy compound week over week.
+Each cloud transcript ends with a **Terms to clarify** list: capitalised words the
+glossary does not know. The same list, filtered to repeated terms, is on the email.
+Skim it and promote the real names. That is the loop that makes accuracy compound
+week over week.
 
 ## Portability
 
@@ -166,6 +187,6 @@ and finds all three.
 .venv\Scripts\python.exe -m pytest tests -q
 ```
 
-161 tests, no network required. The valuable ones encode real measurements: the gate
+240 tests, no network required. The valuable ones encode real measurements: the gate
 calibration table, the verbatim hallucination strings the loop detector must catch, and
 the credential mistakes that actually happened (a pasted app password with spaces in it).

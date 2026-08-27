@@ -6,6 +6,10 @@
     Creates a task that launches Watch-Recorder.ps1 hidden at logon. Idempotent: run it
     again to update the task rather than duplicate it.
 
+    Launched via Watch-Recorder-Silent.vbs (wscript Run style 0), not powershell
+    -WindowStyle Hidden: an Interactive scheduled task still allocates a console, and
+    the watcher's heartbeat Write-Output then keeps that window visible.
+
     Logon trigger plus a resident WMI watcher, rather than a device-arrival event
     trigger: the event-trigger route needs an XML event filter against Kernel-PnP that
     is fiddly to get right and silently matches nothing when wrong. A watcher that
@@ -34,6 +38,7 @@ param(
     [string]$ProjectDir = "",
     [string]$Python = "C:\Python313\python.exe",
     [string]$TaskName = "AutoWork Recorder Watcher",
+    [string]$DigestTaskName = "AutoWork Morning Queue",
     [switch]$Uninstall
 )
 
@@ -44,32 +49,34 @@ $ErrorActionPreference = "Stop"
 if (-not $ProjectDir) { $ProjectDir = Split-Path -Parent $PSScriptRoot }
 
 if ($Uninstall) {
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        "removed scheduled task: $TaskName"
-    } else {
-        "no such scheduled task: $TaskName"
+    foreach ($name in @($TaskName, $DigestTaskName)) {
+        if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false
+            "removed scheduled task: $name"
+        } else {
+            "no such scheduled task: $name"
+        }
     }
     return
 }
 
 $watcher = Join-Path $PSScriptRoot "Watch-Recorder.ps1"
-foreach ($p in @($watcher, $Python)) {
+$silent = Join-Path $PSScriptRoot "Watch-Recorder-Silent.vbs"
+foreach ($p in @($watcher, $silent, $Python)) {
     if (-not (Test-Path $p)) { throw "not found: $p" }
 }
 
+# wscript.exe //B: no script UI. The .vbs hides the powershell console.
 $arguments = @(
-    "-NoProfile"
-    "-NonInteractive"
-    "-WindowStyle", "Hidden"
-    "-ExecutionPolicy", "Bypass"
-    "-File", "`"$watcher`""
-    "-Serial", $Serial
-    "-ProjectDir", "`"$ProjectDir`""
-    "-Python", "`"$Python`""
+    "//B"
+    "//nologo"
+    "`"$silent`""
+    $Serial
+    "`"$ProjectDir`""
+    "`"$Python`""
 ) -join " "
 
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
+$action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument $arguments
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 
 $settings = New-ScheduledTaskSettingsSet `
@@ -99,10 +106,37 @@ Register-ScheduledTask `
 "  project     $ProjectDir"
 "  python      $Python"
 ""
-"It starts at your next logon. To start it now without logging out:"
+
+$digestScript = Join-Path $ProjectDir "tools\send_queue_digest.py"
+if (-not (Test-Path $digestScript)) { throw "not found: $digestScript" }
+$digestAction = New-ScheduledTaskAction `
+    -Execute $Python `
+    -Argument "-u `"$digestScript`"" `
+    -WorkingDirectory $ProjectDir
+$digestTrigger = New-ScheduledTaskTrigger `
+    -Weekly `
+    -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday `
+    -At 7:30am
+Register-ScheduledTask `
+    -TaskName $DigestTaskName `
+    -Action $digestAction `
+    -Trigger $digestTrigger `
+    -Settings $settings `
+    -Principal $principal `
+    -Description "Weekday 7:30am email of outstanding AutoWork actions. Does not execute them." `
+    -Force | Out-Null
+
+"registered scheduled task: $DigestTaskName"
+"  weekdays    07:30 local, outstanding PENDING + APPROVED items"
+""
+"It starts at your next logon. To start the watcher now without logging out:"
 "  Start-ScheduledTask -TaskName '$TaskName'"
 ""
-"To check it is alive:"
+"To send the morning queue now:"
+"  Start-ScheduledTask -TaskName '$DigestTaskName'"
+"  or:  $Python -u `"$digestScript`""
+""
+"To check the watcher is alive:"
 "  Get-ScheduledTask -TaskName '$TaskName' | Get-ScheduledTaskInfo"
 "  Get-Content '$ProjectDir\logs\watcher.log' -Tail 20"
 ""

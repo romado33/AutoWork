@@ -44,6 +44,9 @@ class Status(str, Enum):
     PENDING   extracted, awaiting human review
     APPROVED  human said yes; eligible for an executor to pick up
     REJECTED  human said no; terminal, kept for audit and for tuning the extractor
+    DONE      human checked the work off; no executor ran. The morning digest
+              omits these. Distinct from EXECUTED, which means an adapter wrote
+              somewhere. Plugging in a USB stick still cannot write to Jira.
     EXECUTED  an executor completed it; terminal
     FAILED    an executor tried and failed; retryable back to APPROVED
     """
@@ -51,6 +54,7 @@ class Status(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+    DONE = "done"
     EXECUTED = "executed"
     FAILED = "failed"
 

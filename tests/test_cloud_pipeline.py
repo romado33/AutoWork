@@ -11,13 +11,12 @@ validate cheaply, because each live attempt costs money and minutes.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
+from autowork.action import ActionRecord, ActionType, Provenance
 from autowork.gate import Segment, Verdict
 from autowork.mailer import MailConfig, MailError, build_message, default_recipient
-from autowork.summarize import Summary
+from autowork.summarize import Summary, SummaryMeta
 from autowork.transcribe_cloud import (
     MAX_UPLOAD_SEC,
     MIN_SEGMENT_SEC,
@@ -193,6 +192,34 @@ def test_text_rendering_carries_every_section() -> None:
     assert "Where should confidence filtering live?" in text
 
 
+def test_summary_glossary_rewrites_prose_not_decision_quotes() -> None:
+    """A cleaned-up decision quote would pass grounding against a corrected transcript
+    even if the model invented it. Headlines are not grounded, so they may be rewritten.
+    """
+    from autowork.glossary import Glossary, Term
+
+    glossary = Glossary(terms=[
+        Term(term="Dave Casal", tier="correct", variants=("Dave Cazal", "Cazal")),
+    ])
+    s = Summary(
+        headline="Take the backlog tool up with Dave Cazal",
+        topics=[{"label": "Dave Cazal", "summary": "Follow up with Dave Cazal."}],
+        decisions=[{
+            "decision": "Follow up with Dave Cazal",
+            "quote": "I should take it up again with Dave Cazal maybe",
+            "verified": True,
+        }],
+        open_questions=["Ask Dave Cazal about the layout?"],
+    )
+    s.apply_glossary(glossary)
+    assert "Dave Casal" in s.headline
+    assert "Cazal" not in s.headline
+    assert s.topics[0]["label"] == "Dave Casal"
+    assert "Dave Casal" in s.decisions[0]["decision"]
+    assert "Dave Cazal" in s.decisions[0]["quote"]
+    assert "Dave Casal" in s.open_questions[0]
+
+
 def test_markdown_rendering_carries_every_section() -> None:
     markdown = summary().to_markdown()
     for expected in ("## Discussed", "## Decided", "## Left open"):
@@ -202,8 +229,6 @@ def test_markdown_rendering_carries_every_section() -> None:
 def test_metadata_header_is_derived_not_generated() -> None:
     """Dates and durations are facts from the file. A model-invented timestamp on a
     work summary is worse than none, because it gets trusted and filed."""
-    from autowork.summarize import SummaryMeta
-
     meta = SummaryMeta.from_filename("R2026-08-25-13-23-54.MP3")
     meta.audio_minutes = 23
     meta.speaker_count = 2
@@ -222,10 +247,22 @@ def test_metadata_header_is_derived_not_generated() -> None:
     assert "Came up" not in rendered
 
 
+def test_implausible_speaker_count_is_omitted_not_printed() -> None:
+    """2026-08-27 11:30 mailed 'Participants 13'. An implausible count is not a fact."""
+    meta = SummaryMeta.from_filename("R2026-08-27-11-30-55.MP3")
+    meta.audio_minutes = 40
+    meta.speaker_count = 0
+    rendered = "\n".join(
+        Summary(
+            headline="h", topics=[], decisions=[], open_questions=[], meta=meta,
+        ).meta_lines()
+    )
+    assert "Participants" not in rendered
+    assert "13" not in rendered
+
+
 def test_unparseable_filename_does_not_invent_a_date() -> None:
     """Expected failure mode handled: no date beats a wrong one."""
-    from autowork.summarize import SummaryMeta
-
     meta = SummaryMeta.from_filename("some-other-file.mp3")
     assert meta.recorded_at is None
     assert "unknown" in meta.when
@@ -233,8 +270,6 @@ def test_unparseable_filename_does_not_invent_a_date() -> None:
 
 def test_actions_render_with_their_grounding_quote() -> None:
     """The to-do section is the detailed half; the quote is what makes it verifiable."""
-    from autowork.action import ActionRecord, ActionType, Provenance
-
     action = ActionRecord(
         title="Finalise the backlog tool",
         body="Take it up again with Dave Casale.",
@@ -256,6 +291,86 @@ def test_actions_render_with_their_grounding_quote() -> None:
     assert "confidence 0.82" in text
     # The email must never imply anything was done.
     assert "have been executed" in text
+    assert "review.bat" in text
+
+
+def _action(title: str, source: str, excerpt: str) -> ActionRecord:
+    return ActionRecord(
+        title=title,
+        body=title,
+        target_system="backlog-tool",
+        action_type=ActionType.TASK,
+        confidence=0.9,
+        provenance=Provenance(
+            source_audio=source,
+            start_sec=10.0, end_sec=20.0, speech_rumble_db=6.6,
+            transcript_excerpt=excerpt,
+            extractor="openai:gpt-5.4-mini/grounded",
+        ),
+    )
+
+
+def test_todo_only_includes_this_recordings_actions() -> None:
+    """A 26 Aug Okta call must not list 25 Aug mapping items under the same To do.
+
+    The whole pending queue is still passed in (a crash once emailed an empty list
+    while items existed). They are split, not dropped.
+    """
+    todays = _action(
+        "Check the backlog tool permissions",
+        "R2026-08-26-09-04-45.MP3",
+        "I'll check that it has the correct permissions anyway.",
+    )
+    yesterdays = _action(
+        "Finalize backlog tool design with Dave Cazal",
+        "R2026-08-25-13-23-54.MP3",
+        "I should take it up again with Dave Cazal maybe",
+    )
+    rendered = Summary(
+        headline="OctoAdmin access issue was checked",
+        topics=[{"label": "Okta", "summary": "Permissions looked correct."}],
+        decisions=[],
+        open_questions=[],
+        meta=SummaryMeta(
+            recorded_at=None,
+            source_files=["R2026-08-26-09-04-45.MP3"],
+        ),
+    )
+    rendered.meta = SummaryMeta.from_filename("R2026-08-26-09-04-45.MP3")
+    rendered.meta.source_files = ["R2026-08-26-09-04-45.MP3"]
+
+    text = rendered.to_text(actions=[todays, yesterdays])
+    html = rendered.to_html(actions=[todays, yesterdays])
+    markdown = rendered.to_markdown(actions=[todays, yesterdays])
+
+    assert "TO DO (1)" in text
+    assert "Check the backlog tool permissions" in text.split("STILL PENDING")[0]
+    assert "Finalize backlog tool design" in text.split("STILL PENDING")[1]
+    assert "Tuesday 25 August 2026, 13:23" in text
+    assert "Not from this recording" in text
+    assert "STILL PENDING FROM EARLIER RECORDINGS (1)" in text
+
+    assert "To do (1)" in html
+    assert "Still pending from earlier recordings (1)" in html
+    assert "Finalize backlog tool design" in html
+    assert "## Still pending from earlier recordings (1)" in markdown
+
+
+def test_other_day_actions_are_not_dropped_when_today_has_none() -> None:
+    """The queue-empty-email failure: earlier pending must still be visible."""
+    older = _action(
+        "Add quote quality threshold",
+        "R2026-08-25-13-23-54.MP3",
+        "there should be like a quality threshold",
+    )
+    s = summary()
+    s.meta = SummaryMeta.from_filename("R2026-08-26-09-04-45.MP3")
+    s.meta.source_files = ["R2026-08-26-09-04-45.MP3"]
+    text = s.to_text(actions=[older])
+
+    assert "TO DO" not in text
+    assert "STILL PENDING FROM EARLIER RECORDINGS (1)" in text
+    assert "Add quote quality threshold" in text
     assert "review.bat" in text
 
 
@@ -289,7 +404,9 @@ def test_from_dict_tolerates_missing_keys() -> None:
 
 
 class _StubResponse:
-    def __init__(self, text): self.text = text; self.segments = []
+    def __init__(self, text):
+        self.text = text
+        self.segments = []
 
 
 class _StubClient:

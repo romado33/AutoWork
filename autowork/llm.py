@@ -27,12 +27,9 @@ contractually excluded from model training; free tiers generally are not, which 
 from __future__ import annotations
 
 import abc
-import json
 import logging
 import os
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)

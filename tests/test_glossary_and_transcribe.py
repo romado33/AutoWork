@@ -179,6 +179,106 @@ def test_no_known_variants_leaves_text_untouched(tmp_path) -> None:
     assert applied == []
 
 
+def test_summary_hint_carries_context_and_variants(tmp_path) -> None:
+    """The summariser already reads the whole call; this is how it learns Okta
+    from an authorization discussion without a second billed pass."""
+    g = Glossary.load(write_glossary(tmp_path, """
+        terms:
+          - term: Okta
+            tier: correct
+            about: [SSO, authorization]
+            variants: [Octo, Octa]
+          - term: Dan
+            tier: prompt
+            variants: []
+        """))
+    hint = g.summary_hint()
+    assert "Okta" in hint
+    assert "authorization" in hint
+    assert "Octo" in hint
+    assert "- Dan" not in hint  # no variants, no about: not a near-miss to teach
+
+
+def test_fill_summary_prompt_injects_glossary() -> None:
+    from autowork.summarize import fill_summary_prompt
+
+    glossary = Glossary(terms=[
+        Term(
+            term="Okta", tier="correct",
+            variants=("Octo",), about=("authorization",),
+        ),
+    ])
+    filled = fill_summary_prompt(
+        "Date {date}.\n{glossary}\n",
+        date_text="Wednesday 26 August 2026",
+        glossary=glossary,
+    )
+    assert "Wednesday 26 August 2026" in filled
+    assert "{date}" not in filled
+    assert "{glossary}" not in filled
+    assert "Okta" in filled
+    assert "authorization" in filled
+
+
+def test_fill_summary_prompt_appends_when_placeholder_missing() -> None:
+    """A pasted custom prompt must not silently drop the known-names block."""
+    from autowork.summarize import fill_summary_prompt
+
+    glossary = Glossary(terms=[
+        Term(term="Okta", tier="correct", variants=("Octo",)),
+    ])
+    filled = fill_summary_prompt(
+        "Just summarise this.",
+        date_text="unknown",
+        glossary=glossary,
+    )
+    assert "Just summarise this." in filled
+    assert "Okta" in filled
+
+
+def test_operator_summary_prompt_has_glossary_slot() -> None:
+    from autowork.summarize import load_summary_prompt
+
+    text = load_summary_prompt()
+    assert "{glossary}" in text
+    assert "near-miss" in text
+
+
+def test_project_glossary_loads_okta_context() -> None:
+    """The live glossary must teach the summariser that Octo-in-auth is Okta."""
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    okta = next(t for t in g.terms if t.term == "Okta")
+    assert "authorization" in okta.about
+    assert "Octo" in okta.variants
+    assert "Okta" in g.summary_hint()
+
+
+# --- clarify loop ----------------------------------------------------------------
+
+
+def test_rewrite_file_fixes_cached_transcript_and_is_idempotent(tmp_path) -> None:
+    """Cached re-sends used to skip correct(), so Dave Cazal survived on disk."""
+    g = Glossary.load(write_glossary(tmp_path, """
+        terms:
+          - term: Dave Casal
+            tier: correct
+            variants: [Dave Cazal, Cazal]
+        """))
+    path = tmp_path / "R2026-08-25-13-23-54.md"
+    path.write_text(
+        "I should take it up again with Dave Cazal maybe.\n",
+        encoding="utf-8",
+    )
+    applied = g.rewrite_file(path)
+    assert applied == ["Dave Casal"]
+    text = path.read_text(encoding="utf-8")
+    assert "Dave Casal" in text
+    assert "Cazal" not in text
+    assert g.rewrite_file(path) == []
+
+
 # --- clarify loop ----------------------------------------------------------------
 
 

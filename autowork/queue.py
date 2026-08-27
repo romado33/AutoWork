@@ -21,7 +21,6 @@ Design notes that are load-bearing, not stylistic:
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -30,6 +29,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from autowork.action import ActionRecord, Status
+from autowork.extract import _normalise, source_key, titles_overlap
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS actions (
@@ -49,10 +49,11 @@ CREATE INDEX IF NOT EXISTS idx_actions_source ON actions(source_audio);
 
 # Terminal states have no outgoing edges except the explicit FAILED -> APPROVED retry.
 ALLOWED_TRANSITIONS: dict[Status, frozenset[Status]] = {
-    Status.PENDING: frozenset({Status.APPROVED, Status.REJECTED}),
-    Status.APPROVED: frozenset({Status.EXECUTED, Status.FAILED, Status.REJECTED}),
-    Status.FAILED: frozenset({Status.APPROVED, Status.REJECTED}),
+    Status.PENDING: frozenset({Status.APPROVED, Status.REJECTED, Status.DONE}),
+    Status.APPROVED: frozenset({Status.EXECUTED, Status.FAILED, Status.REJECTED, Status.DONE}),
+    Status.FAILED: frozenset({Status.APPROVED, Status.REJECTED, Status.DONE}),
     Status.REJECTED: frozenset(),
+    Status.DONE: frozenset(),
     Status.EXECUTED: frozenset(),
 }
 
@@ -81,7 +82,7 @@ def dedupe_key(action: ActionRecord) -> str:
     existing review decision.
     """
     p = action.provenance
-    quote = " ".join(re.findall(r"[a-z0-9']+", p.transcript_excerpt.lower()))
+    quote = _normalise(p.transcript_excerpt)
     raw = f"{p.source_audio}|{quote}"
     return sha256(raw.encode("utf-8")).hexdigest()
 
@@ -180,9 +181,12 @@ class ReviewQueue:
             raise QueueError(
                 "a rejection requires a note; it is the extractor's only feedback"
             )
-        return self._transition(
+        action = self._transition(
             action_id, Status.REJECTED, reviewed_at=_utc_now(), review_note=note
         )
+        self._cascade_similar(action, Status.REJECTED, reviewed_at=_utc_now(),
+                              review_note=f"same to-do as {action.id[:8]}: {note}")
+        return action
 
     def mark_executed(self, action_id: str, executor: str, detail: str) -> ActionRecord:
         return self._transition(
@@ -204,6 +208,45 @@ class ReviewQueue:
 
     def retry(self, action_id: str) -> ActionRecord:
         return self._transition(action_id, Status.APPROVED)
+
+    def mark_done(self, action_id: str, note: str | None = None) -> ActionRecord:
+        """Human checked the work off. No executor runs. Drops off the morning digest.
+
+        Same-recording title clones (different quotes, same to-do) are checked off
+        with it. Otherwise marking one Dave Casal item done would leave its twin
+        on tomorrow's email.
+        """
+        action = self._transition(
+            action_id, Status.DONE, reviewed_at=_utc_now(), review_note=note
+        )
+        self._cascade_similar(
+            action, Status.DONE, reviewed_at=_utc_now(),
+            review_note=note or f"same to-do as {action.id[:8]}",
+        )
+        return action
+
+    def _cascade_similar(self, action: ActionRecord, new_status: Status, **updates: str | None) -> None:
+        src = source_key(action)
+        for other in self.list_outstanding():
+            if other.id == action.id:
+                continue
+            if source_key(other) != src:
+                continue
+            if not titles_overlap(other.title, action.title):
+                continue
+            if new_status not in ALLOWED_TRANSITIONS[other.status]:
+                continue
+            self._transition(other.id, new_status, **updates)
+
+    def list_outstanding(self) -> list[ActionRecord]:
+        """PENDING and APPROVED: still on the operator's plate.
+
+        REJECTED, DONE, EXECUTED and FAILED are not. The morning digest is this list.
+        """
+        found: list[ActionRecord] = []
+        for status in (Status.PENDING, Status.APPROVED):
+            found.extend(self.list(status=status))
+        return found
 
     # ---- reads --------------------------------------------------------------
 

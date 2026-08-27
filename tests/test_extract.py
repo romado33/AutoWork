@@ -24,9 +24,12 @@ from autowork.extract import (
     Candidate,
     ExtractionError,
     ExtractorConfig,
+    _dedupe_by_quote,
+    _dedupe_by_title,
     chunk_transcript,
     ground,
     parse_candidates,
+    titles_overlap,
     to_action_record,
 )
 from autowork.gate import Verdict
@@ -300,8 +303,6 @@ def test_chunk_overlap_duplicates_collapse_by_quote_containment() -> None:
     """Regression from a real run: the commitment straddling a chunk boundary was
     extracted twice with nested quote spans. Containment means the same spoken moment;
     the higher-confidence record survives."""
-    from autowork.extract import _dedupe_by_quote
-
     short = to_action_record(
         candidate(confidence=0.88,
                   quote="only the top, I don't know, five would be used"),
@@ -323,3 +324,49 @@ def test_chunk_overlap_duplicates_collapse_by_quote_containment() -> None:
     quotes = [s.provenance.transcript_excerpt for s in survivors]
     assert any("and then in the" in q for q in quotes), "kept the higher-confidence one"
     assert any("different commitment" in q for q in quotes)
+
+
+def test_casal_title_pair_is_the_same_todo() -> None:
+    """Real digest duplicate: two titles, two quotes, one piece of work."""
+    assert titles_overlap(
+        "Finalize backlog tool design with Dave Casal",
+        "Finalize backlog tool with Dave Casal",
+    )
+
+
+def test_distinct_commitments_do_not_collapse_by_title() -> None:
+    """Andrew vs Joe, or quote-threshold vs Casal, must stay two items."""
+    assert not titles_overlap(
+        "Update Okta permissions for Andrew",
+        "Update Okta permissions for Joe",
+    )
+    assert not titles_overlap(
+        "Add quote quality threshold",
+        "Set Salesforce quote confidence threshold",
+    )
+    assert not titles_overlap(
+        "Finalize backlog tool with Dave Casal",
+        "Check the backlog tool permissions",
+    )
+
+
+def test_same_run_title_clones_collapse_keeping_higher_confidence() -> None:
+    keeper = to_action_record(
+        candidate(
+            title="Finalize backlog tool design with Dave Casal",
+            confidence=0.96,
+            quote="I should take it up again with Dave Casal maybe and just get it finalized",
+        ),
+        segment(), config(),
+    )
+    clone = to_action_record(
+        candidate(
+            title="Finalize backlog tool with Dave Casal",
+            confidence=0.95,
+            quote="But I mean it is working. It doesn't happen like that a lot. It's making sure",
+        ),
+        segment(), config(),
+    )
+    survivors = _dedupe_by_title([clone, keeper])
+    assert len(survivors) == 1
+    assert survivors[0].title.startswith("Finalize backlog tool design")

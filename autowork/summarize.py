@@ -24,20 +24,24 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from autowork.extract import _normalise as _normalise_for_matching, collapse_same_recording
 from autowork.llm import Backend, LLMError, build_backend
 
 logger = logging.getLogger(__name__)
 
 
-def _normalise_for_matching(text: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace -- for quote grounding.
+def _action_source_name(action: object) -> str:
+    return Path(getattr(action.provenance, "source_audio", "")).name
 
-    Same normalisation the action extractor uses: a reproduced quote that lost a comma
-    is not fabrication, while inventing a sentence that survives this is still hard.
-    """
-    import re as _re
 
-    return " ".join(_re.findall(r"[a-z0-9']+", text.lower()))
+def _action_origin(action: object) -> str:
+    """Human-readable recording stamp for an action, derived from the filename."""
+    name = _action_source_name(action)
+    stamp = SummaryMeta.from_filename(name).recorded_at
+    if stamp is None:
+        return name or "unknown recording"
+    return f"{stamp.strftime('%A %d %B %Y, %H:%M')} · {name}"
+
 
 DEFAULT_BACKEND = "openai:gpt-5.4-mini"
 
@@ -125,10 +129,18 @@ Rules:
   keep it as spoken, inside the topic or decision it belongs to.
 - "open_questions" are questions the conversation left genuinely unresolved.
 - Do not produce a list of people mentioned. Names belong inline where they
-  came up. Copy names exactly as spoken; never add titles or turn a company
-  name like "Carter Lumber" into a person.
+  came up. Never add titles or turn a company name like "Carter Lumber" into a
+  person. Copy names from the transcript, except: when the conversation is
+  clearly about a known person or system, use the canonical spelling from the
+  known-names list below even if Whisper wrote a near-miss. Do not introduce a
+  name that was not discussed.
 - If the transcript contains no substantive work content (accidental recording,
   mostly garbled), return empty arrays and set "note" to a one-line reason.
+  Fluent topic-salad is garbled: grammatical sentences that jump between unrelated
+  subjects (satellites, video games, a backlog item) with no followable thread are
+  not a meeting. Do not summarise them. Empty arrays plus a note.
+
+{glossary}
 
 Return only a JSON object with this shape:
 {
@@ -177,6 +189,23 @@ def load_summary_prompt() -> str:
     return SUMMARY_PROMPT
 
 
+def fill_summary_prompt(
+    template: str,
+    *,
+    date_text: str,
+    glossary=None,
+) -> str:
+    """Substitute {date} and {glossary}. A pasted prompt without {glossary} still
+    gets the known-names block appended, so operator edits cannot drop it."""
+    hint = glossary.summary_hint() if glossary is not None else ""
+    text = template.replace("{date}", date_text)
+    if "{glossary}" in text:
+        return text.replace("{glossary}", hint or "Known names: none listed.")
+    if hint:
+        return f"{text.rstrip()}\n\n{hint}\n"
+    return text
+
+
 class SummaryError(RuntimeError):
     """Summarisation failed. Raised rather than returning an empty summary, because a
     blank summary and a failed request must not look the same in an inbox."""
@@ -191,10 +220,9 @@ class SummaryMeta:
     invites a confidently wrong timestamp, and a wrong date on a work summary is worse
     than no date because it gets trusted and filed.
 
-    `participants` is the exception and is labelled honestly: those are names MENTIONED
-    in the conversation, which is not the same as who was present. Someone discussed in
-    the third person appears here too, and there is no way to tell the difference from a
-    transcript alone.
+    Calendar invitees, when present, are a separate derived field: they come from
+    Outlook for the overlapping meeting, labelled 'from calendar', and are not
+    inferred from names spoken in the transcript.
     """
 
     recorded_at: datetime | None = None
@@ -202,6 +230,8 @@ class SummaryMeta:
     audio_minutes: float = 0.0
     speaker_count: int = 0
     segment_count: int = 0
+    meeting_title: str | None = None
+    invitees: list[str] = field(default_factory=list)
 
     @property
     def when(self) -> str:
@@ -236,6 +266,8 @@ class Summary:
     open_questions: list[str]
     note: str | None = None
     meta: SummaryMeta = field(default_factory=SummaryMeta)
+    # Glossary flywheel, derived from the transcript, never from the model.
+    clarify_terms: list[str] = field(default_factory=list)
     backend: str = ""
     elapsed_sec: float = 0.0
     input_tokens: int | None = None
@@ -296,14 +328,61 @@ class Summary:
                 and _normalise_for_matching(entry["quote"]) in haystack
             )
 
+    def apply_glossary(self, glossary) -> None:
+        """Rewrite known variants in generated prose. Decision quotes stay verbatim.
+
+        Quotes are string-matched against the transcript; cleaning them here would
+        make a fabricated quote look grounded. Headlines and topics are not matched,
+        so Cazal -> Casal belongs there once the glossary knows the name.
+        """
+        self.headline, _ = glossary.correct(self.headline)
+        for topic in self.topics:
+            topic["label"], _ = glossary.correct(topic.get("label", ""))
+            topic["summary"], _ = glossary.correct(topic.get("summary", ""))
+        for entry in self.decisions:
+            entry["decision"], _ = glossary.correct(entry.get("decision", ""))
+        self.open_questions = [
+            glossary.correct(q)[0] for q in self.open_questions
+        ]
+        if self.note:
+            self.note, _ = glossary.correct(self.note)
+
+    def partition_actions(self, actions: list | None) -> tuple[list, list]:
+        """Split pending items into this recording-set vs earlier days.
+
+        The email used to dump the entire pending queue under today's headline.
+        Measured: a 26 August Okta call with Andrew arrived with yesterday's Dan
+        mapping/backlog items in the same To do list, and read as one meeting.
+        The queue stays the source of truth; earlier items move to a labelled
+        section instead of disappearing (a previous crash sent an email with an
+        empty to-do list while the queue still held work).
+
+        If this summary has no source_files yet, every action stays in the main
+        list -- hiding the queue behind a missing filename would be worse.
+        """
+        if not actions:
+            return [], []
+        sources = {Path(name).name.lower() for name in self.meta.source_files if name}
+        if not sources:
+            return list(actions), []
+        today: list = []
+        earlier: list = []
+        for action in actions:
+            if _action_source_name(action).lower() in sources:
+                today.append(action)
+            else:
+                earlier.append(action)
+        return collapse_same_recording(today), collapse_same_recording(earlier)
+
     def to_markdown(self, actions: list | None = None) -> str:
         lines = [f"# {self.headline}", ""]
         lines += [f"- {line}" for line in self.meta_lines()]
         lines.append("")
 
-        if actions:
-            lines += [f"## To do ({len(actions)})", ""]
-            for action in actions:
+        today, earlier = self.partition_actions(actions)
+        if today:
+            lines += [f"## To do ({len(today)})", ""]
+            for action in today:
                 lines += [
                     f"### {action.title}",
                     "",
@@ -314,7 +393,7 @@ class Summary:
                     f'- Said: _"{action.provenance.transcript_excerpt}"_',
                     "",
                 ]
-            lines += ["_Not executed. Approve with `scripts\\review.bat`._", ""]
+            lines += ["_Not executed. Review with `scripts\\review-ui.bat` (or `scripts\\review.bat`)._", ""]
 
         if self.topics:
             lines += ["## Discussed", ""]
@@ -331,6 +410,39 @@ class Summary:
             lines.append("")
         if self.open_questions:
             lines += ["## Left open", "", *(f"- {q}" for q in self.open_questions), ""]
+
+        if earlier:
+            lines += [
+                f"## Still pending from earlier recordings ({len(earlier)})",
+                "",
+                "Not from this recording. Still awaiting review.",
+                "",
+            ]
+            for action in earlier:
+                lines += [
+                    f"### {action.title}",
+                    "",
+                    f"- From: {_action_origin(action)}",
+                    "",
+                    action.body,
+                    "",
+                    f"- Target: `{action.target_system}` / {action.action_type.value}"
+                    f" / confidence {action.confidence:.2f}",
+                    f'- Said: _"{action.provenance.transcript_excerpt}"_',
+                    "",
+                ]
+            if not today:
+                lines += ["_Not executed. Review with `scripts\\review-ui.bat` (or `scripts\\review.bat`)._", ""]
+
+        if self.clarify_terms:
+            lines += [
+                "## Terms to clarify",
+                "",
+                "Capitalised words the glossary does not know. Skim and promote real names.",
+                "",
+                *(f"- {word}" for word in self.clarify_terms),
+                "",
+            ]
         return "\n".join(lines)
 
     def to_html(self, actions: list | None = None) -> str:
@@ -360,9 +472,10 @@ class Summary:
         if self.note:
             parts.append(f"<p style='color:#a60'><b>Note:</b> {esc(self.note)}</p>")
 
-        if actions:
-            parts.append(f"<h3>To do ({len(actions)})</h3><ol>")
-            for action in actions:
+        today, earlier = self.partition_actions(actions)
+        if today:
+            parts.append(f"<h3>To do ({len(today)})</h3><ol>")
+            for action in today:
                 parts.append(
                     f"<li style='margin-bottom:10px'><b>{esc(action.title)}</b><br>"
                     f"{esc(action.body)}<br>"
@@ -373,7 +486,8 @@ class Summary:
                 )
             parts.append(
                 "</ol><p style='color:#777;font-size:12px'>None of these have been "
-                "executed. Review with <code>scripts\\review.bat</code>.</p>"
+                "executed. Review with <code>scripts\\review-ui.bat</code> "
+                "(or <code>scripts\\review.bat</code>).</p>"
             )
 
         if self.topics:
@@ -397,6 +511,40 @@ class Summary:
             parts.append("<h3>Left open</h3><ul>")
             parts += [f"<li>{esc(q)}</li>" for q in self.open_questions]
             parts.append("</ul>")
+
+        if earlier:
+            parts.append(
+                f"<h3>Still pending from earlier recordings ({len(earlier)})</h3>"
+                "<p style='color:#777;font-size:12px'>Not from this recording. "
+                "Still awaiting review.</p><ol>"
+            )
+            for action in earlier:
+                parts.append(
+                    f"<li style='margin-bottom:10px'><b>{esc(action.title)}</b><br>"
+                    f"<span style='color:#777;font-size:12px'>"
+                    f"From: {esc(_action_origin(action))}</span><br>"
+                    f"{esc(action.body)}<br>"
+                    f"<span style='color:#777;font-size:12px'>"
+                    f"{esc(action.target_system)} / {esc(action.action_type.value)} / "
+                    f"confidence {action.confidence:.2f}</span><br>"
+                    f"<i style='color:#555'>said: “{esc(action.provenance.transcript_excerpt)}”</i></li>"
+                )
+            parts.append("</ol>")
+            if not today:
+                parts.append(
+                    "<p style='color:#777;font-size:12px'>None of these have been "
+                    "executed. Review with <code>scripts\\review-ui.bat</code> "
+                    "(or <code>scripts\\review.bat</code>).</p>"
+                )
+
+        if self.clarify_terms:
+            parts.append(
+                "<h3>Terms to clarify</h3>"
+                "<p style='color:#777;font-size:12px'>Glossary does not know these yet. "
+                "Promote real names into <code>config/glossary.yml</code>.</p><ul>"
+            )
+            parts += [f"<li>{esc(word)}</li>" for word in self.clarify_terms]
+            parts.append("</ul>")
         return "\n".join(parts)
 
     def meta_lines(self) -> list[str]:
@@ -416,6 +564,13 @@ class Summary:
             # From the diarizer: distinct voices heard on the recording. This is the
             # participant count, as far as audio can know it.
             lines.append(f"Participants  {m.speaker_count} (distinct voices heard)")
+        if m.meeting_title:
+            lines.append(f"Meeting       {m.meeting_title}")
+        if m.invitees:
+            # Calendar invite, not names spoken, not diarization labels.
+            lines.append(
+                f"Invitees      {', '.join(m.invitees)} (from calendar)"
+            )
         if m.source_files:
             lines.append(f"Recording     {', '.join(m.source_files)}")
         return lines
@@ -423,17 +578,19 @@ class Summary:
     def to_text(self, actions: list | None = None) -> str:
         """Plain-text mail body. Must be readable without markdown rendering.
 
-        `actions` are the grounded items from the review queue, rendered in full: the
-        summary is deliberately terse, so the detail belongs here where it is actionable
-        and carries the quote that justifies it.
+        `actions` are pending items from the review queue. Only those whose source
+        recording is in this summary's source_files appear under TO DO. The rest go
+        in a labelled earlier-recordings section so one meeting's headline does not
+        absorb another day's commitments.
         """
         lines = [f"TOPIC       {self.headline}", *self.meta_lines(), ""]
         if self.note:
             lines += [f"NOTE: {self.note}", ""]
 
-        if actions:
-            lines += ["=" * 68, f"TO DO ({len(actions)})", "=" * 68, ""]
-            for index, action in enumerate(actions, start=1):
+        today, earlier = self.partition_actions(actions)
+        if today:
+            lines += ["=" * 68, f"TO DO ({len(today)})", "=" * 68, ""]
+            for index, action in enumerate(today, start=1):
                 lines.append(f"{index}. {action.title}")
                 lines.append(f"   {action.body}")
                 lines.append(
@@ -443,7 +600,8 @@ class Summary:
                 lines.append(f'   said: "{action.provenance.transcript_excerpt}"')
                 lines.append("")
             lines += [
-                "None of these have been executed. Review and approve with:",
+                "None of these have been executed. Review with:",
+                "  scripts\\review-ui.bat",
                 "  scripts\\review.bat",
                 "",
             ]
@@ -463,6 +621,40 @@ class Summary:
             lines.append("")
         if self.open_questions:
             lines += ["LEFT OPEN", *(f"  * {q}" for q in self.open_questions), ""]
+
+        if earlier:
+            lines += [
+                "=" * 68,
+                f"STILL PENDING FROM EARLIER RECORDINGS ({len(earlier)})",
+                "=" * 68,
+                "Not from this recording. Still awaiting review.",
+                "",
+            ]
+            for index, action in enumerate(earlier, start=1):
+                lines.append(f"{index}. {action.title}")
+                lines.append(f"   from: {_action_origin(action)}")
+                lines.append(f"   {action.body}")
+                lines.append(
+                    f"   target: {action.target_system} / "
+                    f"{action.action_type.value} / confidence {action.confidence:.2f}"
+                )
+                lines.append(f'   said: "{action.provenance.transcript_excerpt}"')
+                lines.append("")
+            if not today:
+                lines += [
+                    "None of these have been executed. Review with:",
+                    "  scripts\\review-ui.bat",
+                    "  scripts\\review.bat",
+                    "",
+                ]
+
+        if self.clarify_terms:
+            lines += [
+                "TERMS TO CLARIFY",
+                "  Skim and promote real names into config/glossary.yml:",
+                *(f"  * {word}" for word in self.clarify_terms),
+                "",
+            ]
         return "\n".join(lines)
 
 
@@ -506,16 +698,40 @@ def summarise(
     text: str,
     backend_spec: str = DEFAULT_BACKEND,
     recorded_at: datetime | None = None,
+    glossary=None,
+    require_intelligible: bool = True,
+    extra_instructions: str = "",
 ) -> Summary:
     """Summarise a transcript, chunking and merging if it is long."""
     if not text.strip():
         raise SummaryError("nothing to summarise: the transcript is empty")
 
+    from autowork.quality import unintelligible_reason
+
+    # Backstop: the pipeline should have dropped these segments already. If a
+    # caller passes leftover salad (or a cached contrib from before the check),
+    # do not spend a summary request inventing a meeting.
+    # require_intelligible=False is the operator --force-keep path only.
+    if require_intelligible:
+        reason = unintelligible_reason(text)
+        if reason:
+            return Summary(
+                headline="Recording was too garbled to summarise",
+                topics=[],
+                decisions=[],
+                open_questions=[],
+                note=reason,
+            )
+
     backend = build_backend(backend_spec)
     # {date} gives the model the recording date as CONTEXT; the prompt still requires
     # relative dates be kept as spoken, so this cannot become invented absolutes.
     date_text = recorded_at.strftime("%A %d %B %Y") if recorded_at else "unknown"
-    prompt_text = load_summary_prompt().replace("{date}", date_text)
+    prompt_text = fill_summary_prompt(
+        load_summary_prompt(), date_text=date_text, glossary=glossary,
+    )
+    if extra_instructions.strip():
+        prompt_text = f"{prompt_text.rstrip()}\n\n{extra_instructions.strip()}\n"
     chunks = _chunk(text)
     logger.info("summarising %d chars in %d chunk(s)", len(text), len(chunks))
 
@@ -524,7 +740,9 @@ def summarise(
     tokens_in = tokens_out = 0
 
     for index, chunk in enumerate(chunks, start=1):
-        prompt = f"{SUMMARY_PROMPT}\nTRANSCRIPT PART {index} OF {len(chunks)}:\n{chunk}\n\nJSON:"
+        prompt = (
+            f"{prompt_text}\nTRANSCRIPT PART {index} OF {len(chunks)}:\n{chunk}\n\nJSON:"
+        )
         data, took, tin, tout = _ask(backend, prompt)
         partials.append(data)
         elapsed += took

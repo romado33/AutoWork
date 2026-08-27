@@ -36,6 +36,9 @@ logger = logging.getLogger(__name__)
 # Overshooting silently truncates the START of the prompt inside whisper.cpp, which
 # would drop terms without telling us -- hence the conservative budget and the warning.
 PROMPT_CHAR_BUDGET = 700
+# Summariser hint: canonical names plus context. Larger than the Whisper prompt
+# because this is a chat completion, not a 224-token decode prefix.
+SUMMARY_HINT_BUDGET = 1600
 
 PROMPT_PREAMBLE = "A work conversation at TrueContext discussing"
 
@@ -66,6 +69,7 @@ class Term:
     term: str
     tier: str
     variants: tuple[str, ...] = ()
+    about: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.term.strip():
@@ -107,11 +111,15 @@ class Glossary:
             if key in seen:
                 raise GlossaryError(f"{source}: duplicate term {name!r}")
             seen.add(key)
+            about_raw = entry.get("about") or []
+            if isinstance(about_raw, str):
+                about_raw = [about_raw]
             terms.append(
                 Term(
                     term=name,
                     tier=str(entry.get("tier", "correct")),
                     variants=tuple(str(v) for v in (entry.get("variants") or [])),
+                    about=tuple(str(v) for v in about_raw),
                 )
             )
 
@@ -163,6 +171,50 @@ class Glossary:
 
         return f"{PROMPT_PREAMBLE} {', '.join(out)}."
 
+    def summary_hint(self, budget: int = SUMMARY_HINT_BUDGET) -> str:
+        """Names and topic hints for the summariser. Not a second model pass.
+
+        The regex correct() pass only rewrites listed variants. This list lets the
+        summariser, which already reads the whole conversation, prefer Okta when
+        the topic is authorization even if Whisper wrote a novel near-miss. It
+        must not invent a product that is not in the transcript.
+        """
+        lines: list[str] = []
+        for term in self.terms:
+            if not term.variants and not term.about:
+                continue
+            detail: list[str] = []
+            if term.about:
+                detail.append(", ".join(term.about))
+            if term.variants:
+                detail.append("transcript may say " + ", ".join(term.variants))
+            lines.append(f"- {term.term} ({'; '.join(detail)})")
+
+        if not lines:
+            return ""
+
+        header = (
+            "Known names. In headlines and topics, use the canonical spelling when "
+            "the conversation is about that person or system, even if the transcript "
+            "has a near-miss (an access/SSO/admin-portal discussion saying Octo or "
+            "Octa is Okta). Do not introduce a name that is not discussed at all. "
+            "Decision quotes stay verbatim, transcription errors included.\n"
+        )
+        kept: list[str] = []
+        length = len(header)
+        for line in lines:
+            addition = len(line) + 1
+            if length + addition > budget:
+                logger.warning(
+                    "glossary summary hint budget (%d chars) reached after %d of %d "
+                    "terms; later entries were omitted",
+                    budget, len(kept), len(lines),
+                )
+                break
+            kept.append(line)
+            length += addition
+        return header + "\n".join(kept)
+
     def correct(self, text: str) -> tuple[str, list[str]]:
         """Replace known variants with their canonical term.
 
@@ -209,6 +261,21 @@ class Glossary:
             return canonical
 
         return pattern.sub(_replace, text), applied
+
+    def rewrite_file(self, path: str | Path) -> list[str]:
+        """Apply correct() to a cached transcript on disk. No-op if already clean.
+
+        Fresh transcription already runs correct() before write. Re-sends read the
+        file as-is, so a variant added later (Dave Cazal, OctoAdmin) never reached
+        the summariser. Rewriting here is the same pass, billed nothing.
+        """
+        source = Path(path)
+        raw = source.read_text(encoding="utf-8")
+        fixed, applied = self.correct(raw)
+        if fixed != raw:
+            source.write_text(fixed, encoding="utf-8")
+            return applied
+        return []
 
     def unknown_proper_nouns(self, text: str, min_occurrences: int = 1) -> list[str]:
         """Heuristic: capitalised words this glossary does not know, seen repeatedly.

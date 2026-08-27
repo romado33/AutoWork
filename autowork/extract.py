@@ -30,13 +30,15 @@ is a substitute for a human reading it.
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from autowork.action import ActionRecord, ActionType, Provenance
-from autowork.llm import Backend, LLMError, build_backend
+from autowork.llm import LLMError, build_backend
 from autowork.transcribe import TranscribedSegment
 
 logger = logging.getLogger(__name__)
@@ -401,7 +403,7 @@ def extract_from_segment(
             else:
                 accepted.append(to_action_record(candidate, segment, config))
 
-    return _dedupe_by_quote(accepted), rejected
+    return _dedupe_by_title(_dedupe_by_quote(accepted)), rejected
 
 
 def quotes_overlap(first: str, second: str, threshold: float = 0.75) -> bool:
@@ -413,14 +415,79 @@ def quotes_overlap(first: str, second: str, threshold: float = 0.75) -> bool:
     75% of their characters verbatim does not happen in practice, because quotes are
     literal transcript spans.
     """
-    import difflib
-
     a, b = _normalise(first), _normalise(second)
     if not a or not b:
         return False
     if a in b or b in a:
         return True
     return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
+
+
+_TITLE_STOP = frozenset({
+    "a", "an", "the", "with", "for", "to", "of", "and", "or", "in", "on",
+    "at", "from", "as", "by", "is", "be", "it", "its",
+})
+
+
+def title_tokens(title: str) -> frozenset[str]:
+    return frozenset(
+        w for w in _normalise(title).split() if w not in _TITLE_STOP and len(w) > 1
+    )
+
+
+def titles_overlap(first: str, second: str, threshold: float = 0.75) -> bool:
+    """Whether two titles from the same recording are the same piece of work.
+
+    Quote identity missed this: one Dave Casal commitment was filed twice with
+    different grounding quotes (one of them not even about Casal). Titles are a
+    bad identity across model runs, but on ONE recording a near-identical title
+    is the same to-do. Token subset (min 4) or Jaccard >= 0.75. "Update Okta
+    for Andrew" vs "Update Okta for Joe" must not collapse (jaccard 0.60).
+    """
+    a, b = title_tokens(first), title_tokens(second)
+    if not a or not b:
+        return False
+    smaller, larger = (a, b) if len(a) <= len(b) else (b, a)
+    if len(smaller) >= 4 and smaller <= larger:
+        return True
+    return len(a & b) / len(a | b) >= threshold
+
+
+def source_key(action: ActionRecord) -> str:
+    """Recording filename, lowercased. Path casing must not split the same file."""
+    return Path(action.provenance.source_audio).name.lower()
+
+
+def collapse_same_recording(actions: list[ActionRecord]) -> list[ActionRecord]:
+    """Keep the higher-confidence item when the same recording filed the same to-do twice.
+
+    Display and enqueue use this. Queue identity stays the quote; this only hides
+    the clone. Original order is preserved among survivors.
+    """
+    ranked = sorted(actions, key=lambda r: (-r.confidence, r.created_at))
+    kept: list[ActionRecord] = []
+    for record in ranked:
+        src = source_key(record)
+        if any(source_key(k) == src and titles_overlap(record.title, k.title) for k in kept):
+            continue
+        kept.append(record)
+    kept_ids = {k.id for k in kept}
+    return [action for action in actions if action.id in kept_ids]
+
+
+def _dedupe_by_title(records: list[ActionRecord]) -> list[ActionRecord]:
+    """Same-run title clones (different quotes, same to-do). After quote-dedupe."""
+    survivors: list[ActionRecord] = []
+    for record in sorted(
+        records,
+        key=lambda r: (-r.confidence, -len(r.title)),
+    ):
+        duplicate = any(titles_overlap(record.title, kept.title) for kept in survivors)
+        if duplicate:
+            logger.info("dropping same-recording title duplicate: %r", record.title[:60])
+        else:
+            survivors.append(record)
+    return survivors
 
 
 def _dedupe_by_quote(records: list[ActionRecord]) -> list[ActionRecord]:

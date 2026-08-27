@@ -27,7 +27,6 @@ Exit codes: 0 success · 1 a backend failed · 2 bad arguments
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 

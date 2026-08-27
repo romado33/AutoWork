@@ -20,6 +20,10 @@
 #
 # `variants` are the misrecognitions actually observed. Add to them as you review;
 # that is the cheapest accuracy win available and it compounds.
+#
+# `about` is optional context for the summariser: when the conversation is about
+# those topics, prefer this canonical name even if Whisper wrote a near-miss that
+# is not yet in `variants`. Do not use it to invent a product that was not discussed.
 
 terms:
   # --- People (TODO: add colleagues you talk about by name) -------------------
@@ -163,8 +167,9 @@ terms:
   # --- Domain vocabulary observed 2026-08-25 ---------------------------------
   - term: Okta
     tier: correct
+    about: [SSO, identity, authorization, admin portal, app assignments]
     # 'Octa' and 'Octo' both observed in the 2026-08-26 transcript.
-    variants: [Octa, Octo]
+    variants: [Octa, Octo, OctoAdmin, Optor, Okta Admin]
   - term: OpenSearch
     tier: correct
     variants: [Open Search, OpenSearch shader]

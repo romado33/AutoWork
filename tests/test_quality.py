@@ -166,3 +166,52 @@ def test_sentence_excision_still_handles_the_measured_tail() -> None:
     assert removed > 140
     assert before in cleaned
     assert after in cleaned
+
+
+def test_summarise_backstop_refuses_a_loop_without_calling_the_model() -> None:
+    """Leftover 11:30 salad must not become a meeting email."""
+    from autowork.summarize import summarise
+
+    text = " ".join([START_AHEAD] * ALWAYS_UNINTELLIGIBLE_PHRASE_RUN)
+    summary = summarise(text)
+    assert summary.topics == []
+    assert summary.decisions == []
+    assert "garbled" in summary.headline.lower()
+
+
+def test_force_keep_bypasses_the_garbled_backstop(monkeypatch) -> None:
+    """Operator --force-keep: still summarise a personal recording."""
+    from autowork import summarize
+
+    text = " ".join([START_AHEAD] * ALWAYS_UNINTELLIGIBLE_PHRASE_RUN)
+    captured: dict = {}
+
+    class Dummy:
+        name = "test"
+        model = "none"
+
+    def fake_ask(backend, prompt):
+        captured["prompt"] = prompt
+        return (
+            {
+                "headline": "Personal catch-up",
+                "topics": [{"label": "Catch-up", "summary": "They talked."}],
+                "decisions": [],
+                "open_questions": [],
+                "note": None,
+            },
+            0.01,
+            10,
+            10,
+        )
+
+    monkeypatch.setattr(summarize, "build_backend", lambda spec: Dummy())
+    monkeypatch.setattr(summarize, "_ask", fake_ask)
+    summary = summarize.summarise(
+        text,
+        require_intelligible=False,
+        extra_instructions="OPERATOR OVERRIDE: personal conversation.",
+    )
+    assert "OPERATOR OVERRIDE" in captured["prompt"]
+    assert summary.headline == "Personal catch-up"
+    assert summary.topics[0]["label"] == "Catch-up"

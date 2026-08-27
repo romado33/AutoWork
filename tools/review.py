@@ -14,8 +14,9 @@ Configurable rather than hardcoded:
     AUTOWORK_QUEUE   queue database (default: ./queue.sqlite3)
 
 This tool never executes anything. Approving marks an action eligible for an executor;
-a separate step runs it. That separation is deliberate -- approving is a judgement, and
-executing is an effect, and conflating them means a mis-keystroke writes to Jira.
+`--done` checks it off the morning digest without running one. That separation is
+deliberate -- approving is a judgement, executing is an effect, and conflating them
+means a mis-keystroke writes to Jira.
 
 Every item is shown with the provenance needed to judge it: the audio file and offset,
 the measured signal quality of that window, and the verbatim quote the extractor
@@ -49,6 +50,7 @@ STATUS_MARK = {
     Status.PENDING: "?",
     Status.APPROVED: "+",
     Status.REJECTED: "x",
+    Status.DONE: "v",
     Status.EXECUTED: "*",
     Status.FAILED: "!",
 }
@@ -121,16 +123,16 @@ def interactive(queue: ReviewQueue) -> int:
         return 0
 
     print(f"{len(pending)} pending action(s), highest confidence first.")
-    print("For each: [a]pprove  [r]eject  [s]kip  [q]uit\n")
+    print("For each: [a]pprove  [d]one  [r]eject  [s]kip  [q]uit\n")
 
-    approved = rejected = skipped = 0
+    approved = rejected = skipped = done = 0
     for index, record in enumerate(pending, start=1):
         show(record)
         print(f"  ---- {index} of {len(pending)} ----")
 
         while True:
             try:
-                choice = input("  [a]pprove / [r]eject / [s]kip / [q]uit > ").strip().lower()
+                choice = input("  [a]pprove / [d]one / [r]eject / [s]kip / [q]uit > ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print("\n  stopped.")
                 choice = "q"
@@ -140,6 +142,12 @@ def interactive(queue: ReviewQueue) -> int:
                 queue.approve(record.id, note=note)
                 approved += 1
                 print("  APPROVED. Not executed -- run the executor separately.")
+                break
+            if choice in {"d", "done"}:
+                note = input("  note (optional) > ").strip() or None
+                queue.mark_done(record.id, note=note)
+                done += 1
+                print("  DONE. No executor ran; it drops off the morning digest.")
                 break
             if choice in {"r", "reject"}:
                 # A reason is required by the queue: it is the only feedback the
@@ -155,12 +163,12 @@ def interactive(queue: ReviewQueue) -> int:
                 skipped += 1
                 break
             if choice in {"q", "quit"}:
-                print(f"\napproved {approved}, rejected {rejected}, skipped {skipped}")
+                print(f"\napproved {approved}, done {done}, rejected {rejected}, skipped {skipped}")
                 print("queue:", queue.counts())
                 return 0
-            print("  unrecognised; enter a, r, s or q")
+            print("  unrecognised; enter a, d, r, s or q")
 
-    print(f"\napproved {approved}, rejected {rejected}, skipped {skipped}")
+    print(f"\napproved {approved}, done {done}, rejected {rejected}, skipped {skipped}")
     print("queue:", queue.counts())
     return 0
 
@@ -174,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target", help="filter --list by target system")
     parser.add_argument("--show", metavar="ID", help="full detail for one action")
     parser.add_argument("--approve", metavar="ID")
+    parser.add_argument("--done", metavar="ID",
+                        help="check the work off; no executor runs")
     parser.add_argument("--reject", metavar="ID")
     parser.add_argument("--retry", metavar="ID")
     parser.add_argument("--note")
@@ -195,6 +205,12 @@ def main(argv: list[str] | None = None) -> int:
                 record = queue.approve(resolve(queue, args.approve), note=args.note)
                 print(f"approved {record.id[:8]}: {record.title}")
                 print("Not executed. Run the executor separately.")
+                return 0
+
+            if args.done is not None:
+                record = queue.mark_done(resolve(queue, args.done), note=args.note)
+                print(f"done {record.id[:8]}: {record.title}")
+                print("No executor ran. It will not appear on the morning digest.")
                 return 0
 
             if args.reject is not None:

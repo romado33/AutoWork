@@ -172,6 +172,21 @@ def test_approve_marks_approved_but_does_not_execute(tmp_path, capsys) -> None:
         assert stored.executor is None
 
 
+def test_done_checks_off_without_executing(tmp_path, capsys) -> None:
+    """Morning-digest check-off: done is not an executor write."""
+    db = tmp_path / "q.sqlite3"
+    with ReviewQueue(db) as q:
+        action_id = q.enqueue(record())
+
+    assert main(["--queue", str(db), "--done", action_id[:8]]) == 0
+    assert "No executor ran" in capsys.readouterr().out
+    with ReviewQueue(db) as q:
+        stored = q.get(action_id)
+        assert stored.status is Status.DONE
+        assert stored.executed_at is None
+        assert stored.executor is None
+
+
 def test_missing_queue_database_is_a_clear_error(tmp_path, capsys) -> None:
     """Expected failure: must not create an empty queue and report 'nothing pending'."""
     assert main(["--queue", str(tmp_path / "absent.sqlite3"), "--list"]) == 2

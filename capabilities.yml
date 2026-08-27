@@ -15,17 +15,21 @@ provides:
     - AutoWork/autowork/transcribe_cloud.py (gate -> slice -> 32kbps mono compress -> OpenAI transcription with diarization)
     - AutoWork/autowork/relevance.py (is-this-a-work-conversation gate — drops podcasts and ambient noise, keeps on doubt)
     - AutoWork/autowork/summarize.py (daily summary with derived-not-generated metadata header)
+    - AutoWork/autowork/day.py (per-recording sidecar so a day's summary is rebuilt, not overwritten)
+    - AutoWork/autowork/calendar_lookup.py (Outlook invitees as derived metadata; omit when overlapping events are 0 or 2+)
     - AutoWork/autowork/mailer.py (Gmail SMTP; accepts GMAIL_*/SMTP_* names, strips pasted app-password spaces)
     - AutoWork/autowork/ingest.py (copy from recorder by volume serial; never deletes from device)
     - AutoWork/autowork/llm.py (swappable LLM backends — openai or anthropic, one config string)
     - AutoWork/tools/run_pipeline.py (end-to-end orchestrator; idempotent per recording)
-    - AutoWork/scripts (setup.bat, run.bat, review.bat, USB watcher + scheduled-task installer)
+    - AutoWork/scripts (setup.bat, run.bat, review.bat, review-ui.bat, USB watcher + scheduled-task installer)
     - AutoWork/autowork/transcribe.py (gate to slice to Whisper to glossary correction, plus repetition-loop detection)
     - AutoWork/autowork/glossary.py (two-tier glossary — budgeted decode prompt, single-pass correction, clarify-candidate list)
     - AutoWork/tools/transcribe_day.py (CLI to transcribe a day's recordings into auditable markdown)
     - AutoWork/tools/review.py (review CLI — see, approve, reject, retry queued actions; never executes)
+    - AutoWork/tools/review_ui.py (localhost review page; mark done so items leave the morning digest; never executes)
+    - AutoWork/scripts/review-ui.bat (opens the review page in a browser)
     - AutoWork/tools/extract_actions.py (CLI to extract grounded action items from transcripts into the queue)
-    - AutoWork/autowork/extract.py (local-model extraction with quote grounding against the source transcript)
+    - AutoWork/autowork/extract.py (cloud extraction with quote grounding against the source transcript)
     - AutoWork/tools/eval_diarization.py (measures whether speaker diarization is viable on a recording; deliberately does not label)
     - AutoWork/tools/scan_audio.py (CLI to screen a day's recordings at ~3000x realtime before transcribing)
     - AutoWork/config/glossary.yml (two-tier domain glossary — decode-time prompt plus post-transcription correction)
@@ -38,9 +42,9 @@ provides:
 
 uses:
   code:
-    - sherpa-onnx (ungated ONNX speaker segmentation + embedding models, no account required)
-    - Vibe/sona.exe (whisper.cpp CLI, MIT-licensed local transcription — no account, no API)
-    - Ollama local models (phi4, gemma3) for offline action extraction
+    - OpenAI APIs (transcription with diarization, summary, extraction)
+    - ffmpeg (audio gate and slice/compress; required)
+    - Outlook desktop COM (optional; meeting title and invitees when a single event overlaps)
 
 notes: >-
   Measured on a full workday of real audio (2026-08-24, 304 minutes): the discriminator

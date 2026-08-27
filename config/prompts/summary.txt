@@ -34,10 +34,18 @@ Rules:
   keep it as spoken, inside the topic or decision it belongs to.
 - "open_questions" are questions the conversation left genuinely unresolved.
 - Do not produce a list of people mentioned. Names belong inline where they
-  came up. Copy names exactly as spoken; never add titles or turn a company
-  name like "Carter Lumber" into a person.
+  came up. Never add titles or turn a company name like "Carter Lumber" into a
+  person. Copy names from the transcript, except: when the conversation is
+  clearly about a known person or system, use the canonical spelling from the
+  known-names list below even if Whisper wrote a near-miss. Do not introduce a
+  name that was not discussed.
 - If the transcript contains no substantive work content (accidental recording,
   mostly garbled), return empty arrays and set "note" to a one-line reason.
+  Fluent topic-salad is garbled: grammatical sentences that jump between unrelated
+  subjects (satellites, video games, a backlog item) with no followable thread are
+  not a meeting. Do not summarise them. Empty arrays plus a note.
+
+{glossary}
 
 Return only a JSON object with this shape:
 {

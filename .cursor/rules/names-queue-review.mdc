@@ -1,0 +1,13 @@
+---
+description: Name correction, digest dedupe, and review UI — do not re-litigate
+alwaysApply: true
+---
+
+# Names, queue duplicates, review
+
+- Glossary `correct()` must run on cached transcript re-sends, not only fresh cloud transcribe. Display-time rewrite in emails does not change queue identity.
+- Do not add a second LLM pass to "understand" Octo=Okta. The summariser already receives `summary_hint()` (canonical names, `about` context, variants). Regex correction is the cheap path. Cloud transcribe prompt-tier made low-signal audio worse when measured.
+- Action identity is the grounding quote. Same-recording near-identical titles are still one to-do when quotes differ (Dave Casal backlog pair, 2026-08-26). Collapse for digest/UI; `mark_done`/`reject` cascade. Do not collapse across recordings (Andrew vs Joe).
+- Review: `scripts\review-ui.bat` (localhost only). Done = off the morning digest, no executor. Approve stays on the digest.
+- USB run = one email per conversation (Outlook event only, no topic clustering). Weekday 07:30 = outstanding digest.
+- Promote observed misses into `config/glossary.yml` (`Dave Cazal` → Dave Casal; `Octo`/`OctoAdmin`/`Optor` → Okta, `about: [SSO, identity, authorization]`).

@@ -24,7 +24,7 @@
     Handle one arrival and exit. Useful for testing without a resident process.
 
 .EXAMPLE
-    .\Watch-Recorder.ps1 -Serial AA986EA1 -ProjectDir C:\Users\RobDods\Apps\ClaudeCode\AutoWork
+    .\Watch-Recorder.ps1 -Serial AA986EA1 -ProjectDir C:\Users\RobDods\Apps\Cursor\AutoWork
 
 .NOTES
     Runs the pipeline, which ingests, transcribes, summarises, extracts and emails.
@@ -119,7 +119,13 @@ Register-WmiEvent -Query $query -SourceIdentifier "RecorderArrival" -SupportEven
 
 try {
     while ($true) {
-        $null = Wait-Event -SourceIdentifier "RecorderArrival"
+        # Timeout rather than an infinite wait: a dead watcher must leave a trail.
+        # 10 minutes is frequent enough to notice, quiet enough not to flood the log.
+        $evt = Wait-Event -SourceIdentifier "RecorderArrival" -Timeout 600
+        if ($null -eq $evt) {
+            Write-Log "heartbeat (alive, serial $Serial)"
+            continue
+        }
         Remove-Event -SourceIdentifier "RecorderArrival"
 
         Write-Log "volume arrival detected; waiting ${SettleSeconds}s to settle"

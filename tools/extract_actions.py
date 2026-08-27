@@ -3,14 +3,12 @@
 
 Usage:
     python tools/extract_actions.py transcripts/R2026-08-25-13-23-54.md
-    python tools/extract_actions.py transcripts/*.md --model phi4:latest
     python tools/extract_actions.py transcripts/*.md --dry-run    # show, do not file
 
-Everything runs on localhost through Ollama. The transcript never leaves the machine.
+Extraction uses the configured cloud backend (see autowork/extract.py), never a
+local model. Only prefiltered commitment-bearing passages are sent.
 
 Configurable rather than hardcoded:
-    AUTOWORK_MODEL_EXTRACT   Ollama model      (default: gemma3:4b)
-    AUTOWORK_OLLAMA_URL      Ollama endpoint   (default: http://localhost:11434)
     AUTOWORK_QUEUE           queue database    (default: ./queue.sqlite3)
 
 Everything filed lands as PENDING. Nothing is executed, and nothing is approved, by
@@ -48,6 +46,8 @@ _HEADING = re.compile(r"^##\s+\S+\s+.\s+\S+\s+\((\d+)s\)")
 _QUALITY = re.compile(r"^- Quality: \*\*(\w+)\*\*, ([-+][\d.]+) dB")
 _OFFSET = re.compile(r"^- Source offset: ([\d.]+)s\s*.\s*([\d.]+)s")
 _CORRECTED = re.compile(r"corrected: ([^·\n]+)")
+_SPEAKERS = re.compile(r"^- speakers:\s*(.+)$")
+_UNINTELLIGIBLE = re.compile(r"^- unintelligible:\s*(.+)$")
 
 
 def parse_transcript(path: Path) -> list[TranscribedSegment]:
@@ -81,6 +81,8 @@ def parse_transcript(path: Path) -> list[TranscribedSegment]:
                 speech_rumble_db=float(current["db"]),
                 text=text,
                 glossary_applied=list(current["glossary"]),  # type: ignore[arg-type]
+                speakers=list(current["speakers"]),  # type: ignore[arg-type]
+                unintelligible_because=str(current.get("unintelligible") or ""),
             )
         )
 
@@ -91,6 +93,7 @@ def parse_transcript(path: Path) -> list[TranscribedSegment]:
             current = {
                 "source": source, "start": 0.0, "end": 0.0,
                 "verdict": "usable", "db": 0.0, "glossary": [],
+                "speakers": [], "unintelligible": "",
             }
             continue
         if line.startswith("---"):
@@ -106,6 +109,14 @@ def parse_transcript(path: Path) -> list[TranscribedSegment]:
             current["start"], current["end"] = float(match.group(1)), float(match.group(2))
         elif line.startswith("- ") and (match := _CORRECTED.search(line)):
             current["glossary"] = [t.strip() for t in match.group(1).split(",")]
+        elif match := _SPEAKERS.match(line):
+            current["speakers"] = [
+                {"speaker": label.strip()}
+                for label in match.group(1).split(",")
+                if label.strip()
+            ]
+        elif match := _UNINTELLIGIBLE.match(line):
+            current["unintelligible"] = match.group(1).strip()
         elif not line.startswith("- "):
             body.append(line)
 

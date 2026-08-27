@@ -3,7 +3,7 @@
 Pocket voice recorder -> ingest by volume serial -> audio quality gate -> cloud
 transcription with diarization -> relevance gate -> summary email + grounded action
 items in a human review queue. Python 3.11+, three deps (openai, PyYAML, pytest),
-ffmpeg required. Run tests: `python -m pytest tests -q` (172 passing; keep it that way).
+ffmpeg required. Run tests: `python -m pytest tests -q` (240 passing; keep it that way).
 
 ## Safety invariants — never weaken these
 
@@ -33,9 +33,21 @@ ffmpeg required. Run tests: `python -m pytest tests -q` (172 passing; keep it th
   to 16 kHz internally; the recorder's channels are bit-identical). Opus 20k degrades.
 - Diarization speaker labels are PER REQUEST: chunk 1's "A" is not chunk 2's "A".
   Never union labels across uploads (it reported 4 speakers on a 2-person call);
-  take the max within one chunk.
+  take the max within one chunk. A 13-label chunk on a 2-person recording
+  (2026-08-27 11:30, including junk `@`) is unintelligible audio, not 13
+  participants — drop it, do not print it as a headcount.
 - Action identity = normalised grounding quote (+ similarity >= 0.75), NOT the title.
-  Titles are reworded on every model run; quotes are stable.
+  Titles are reworded on every model run; quotes are stable. Same-recording
+  near-identical titles are still the same to-do when quotes differ (measured:
+  two Dave Casal backlog items, one quote not even about Casal). Collapse those
+  for digest/UI; mark_done/reject cascades to the clone. Do not identity by title
+  across recordings (Andrew vs Joe Okta permissions must stay two items).
+- Glossary `correct()` runs on fresh transcribe AND on cached transcript re-sends
+  (`rewrite_file`). Emails also rewrite known variants at display time; that does
+  not change queue identity. A second LLM "semantic parse" for names is the expensive
+  wrong lever — the summariser already gets `summary_hint()` (canonical + `about` +
+  variants). Do not prime cloud transcription with the glossary prompt on low-signal
+  audio (measured: hallucinations get worse).
 - Prompt/threshold changes must be checked against known-outcome data before shipping.
   Ground truth so far: transcripts/ + KNOWN_ITEMS in tools/compare_backends.py.
 
@@ -60,6 +72,13 @@ ffmpeg required. Run tests: `python -m pytest tests -q` (172 passing; keep it th
 - The summary prompt is operator-editable at config/prompts/summary.txt; the schema
   and quote-grounding stay in code so a pasted prompt cannot weaken them.
 - The glossary (config/glossary.yml) is the accuracy flywheel: every observed
-  mistranscription becomes a variant. Comments in files explain measured WHY, not what.
+  mistranscription becomes a variant. Optional `about:` is topic context for the
+  summariser (Okta: SSO/identity/authorization — Octo/Octa in an access discussion
+  is Okta). Dave Casal variants include Cazal. Comments in files explain measured
+  WHY, not what.
+- USB plug-in sends one email per conversation (same Outlook event only; no LLM
+  topic clustering). Weekday 07:30 sends the outstanding digest. Review UI:
+  `scripts\review-ui.bat` (127.0.0.1 only). Mark done drops an item from the
+  morning email; no executor runs. Approve stays on the digest until done.
 - Every functional change updates tests or states why none is needed. Failure-mode
   tests quote the verbatim strings from real incidents.

@@ -191,6 +191,42 @@ def test_failed_action_can_be_retried(queue: ReviewQueue) -> None:
     assert queue.retry(action_id).status is Status.APPROVED
 
 
+def test_mark_done_from_pending_skips_the_executor(queue: ReviewQueue) -> None:
+    """Checking work off is not dispatch. USB still cannot write to Jira."""
+    action_id = queue.enqueue(make_action())
+    assert queue.mark_done(action_id).status is Status.DONE
+    assert queue.list_outstanding() == []
+
+
+def test_mark_done_checks_off_same_recording_title_clone(queue: ReviewQueue) -> None:
+    """Otherwise the digest clone reappears the next morning."""
+    first = queue.enqueue(make_action(
+        title="Finalize backlog tool design with Dave Casal",
+        provenance=make_provenance(
+            source_audio="R2026-08-25-13-23-54.MP3",
+            transcript_excerpt="I should take it up again with Dave Casal maybe and just get it finalized",
+        ),
+    ))
+    clone = queue.enqueue(make_action(
+        title="Finalize backlog tool with Dave Casal",
+        provenance=make_provenance(
+            source_audio="R2026-08-25-13-23-54.MP3",
+            transcript_excerpt="But I mean it is working it doesn't happen like that a lot making sure",
+        ),
+    ))
+    queue.mark_done(first)
+    assert queue.get(first).status is Status.DONE
+    assert queue.get(clone).status is Status.DONE
+    assert queue.list_outstanding() == []
+
+
+def test_done_is_terminal(queue: ReviewQueue) -> None:
+    action_id = queue.enqueue(make_action())
+    queue.mark_done(action_id)
+    with pytest.raises(QueueError, match="illegal transition"):
+        queue.approve(action_id)
+
+
 def test_get_unknown_id_raises(queue: ReviewQueue) -> None:
     """Expected failure."""
     with pytest.raises(QueueError, match="no action with id"):

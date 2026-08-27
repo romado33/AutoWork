@@ -42,13 +42,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 
-from autowork.extract import ExtractionError, ExtractorConfig, extract_from_segment  # noqa: E402
-from autowork.gate import GateConfig  # noqa: E402
+from autowork.extract import (  # noqa: E402
+    ExtractionError,
+    ExtractorConfig,
+    extract_from_segment,
+    quotes_overlap,
+    source_key,
+    titles_overlap,
+)
+from autowork.gate import GateConfig, Verdict  # noqa: E402
 from autowork.glossary import Glossary, GlossaryError  # noqa: E402
 from autowork.ingest import IngestError, ingest  # noqa: E402
 from autowork.llm import load_dotenv  # noqa: E402
 from autowork.mailer import MailError, default_recipient, send  # noqa: E402
 from autowork.prefilter import select  # noqa: E402
+from autowork.quality import assess, retain_intelligible, speaker_count_for_header  # noqa: E402
 from autowork.action import Status  # noqa: E402
 from autowork.queue import ReviewQueue  # noqa: E402
 from autowork.relevance import RelevanceError, classify  # noqa: E402
@@ -60,12 +68,33 @@ from autowork.transcribe_cloud import (  # noqa: E402
     CloudTranscriptionError,
     transcribe_file_cloud,
 )
-from autowork.gate import Verdict  # noqa: E402
+from autowork.day import (  # noqa: E402
+    Contribution,
+    clarify_markdown,
+    date_from_filename,
+    isoformat,
+    load_kept_for_date,
+    save_contribution,
+)
+from autowork.conversations import Conversation, group_conversations  # noqa: E402
+from autowork.calendar_lookup import match_recording  # noqa: E402
+from autowork.digest import apply_glossary_all  # noqa: E402
 
 DEFAULT_SERIAL = "AA986EA1"
 
+# Operator --force-keep only. Does not change the default work/intelligibility gates.
+FORCE_KEEP_PROMPT = """\
+OPERATOR OVERRIDE (one-time, this recording only):
+This is a personal conversation the operator chose to keep. Summarise what was
+actually said as a personal catch-up, not as a work meeting. Do not invent
+workstreams, product launches, satellite economics, or to-dos from garbled
+fragments or background chatter. Omit unintelligible stretches. Empty topics
+and an honest note are better than a fake meeting. Ignore the usual rule that
+non-work content should be discarded — the operator already made that call.
+"""
 
-def render_transcript(path: Path, segs: list) -> str:
+
+def render_transcript(path: Path, segs: list, glossary: Glossary | None = None) -> str:
     """Markdown transcript, in the shape the downstream tools already parse."""
     lines = [
         f"# Transcript — {path.name}",
@@ -88,6 +117,8 @@ def render_transcript(path: Path, segs: list) -> str:
         ]
         if seg.glossary_applied:
             lines.append(f"- corrected: {', '.join(seg.glossary_applied)}")
+        if getattr(seg, "unintelligible_because", ""):
+            lines.append(f"- unintelligible: {seg.unintelligible_because}")
         speakers = sorted({s["speaker"] for s in seg.speakers if s.get("speaker")})
         if speakers:
             lines.append(f"- speakers: {', '.join(speakers)}")
@@ -102,7 +133,52 @@ def render_transcript(path: Path, segs: list) -> str:
                     f"{turn.get('text', '').strip()}"
                 )
             lines += ["", "</details>", ""]
+
+    if glossary is not None:
+        combined = "\n\n".join(s.text for s in segs if getattr(s, "text", "").strip())
+        unknown = glossary.unknown_proper_nouns(combined)
+        footer = clarify_markdown(unknown)
+        if footer:
+            lines.append(footer.rstrip("\n"))
+            lines.append("")
     return "\n".join(lines)
+
+
+def speaker_max(segments: list) -> int:
+    """Max believable distinct speakers in any one segment.
+
+    Labels are per request, not a union. Implausible counts (13 on a 2-person
+    recording, 2026-08-27) return 0 so the email omits the Participants line
+    rather than printing a fake headcount.
+    """
+    return speaker_count_for_header(segments)
+
+
+def note_contribution(
+    transcript_dir: Path,
+    path: Path,
+    *,
+    keep: bool,
+    text: str,
+    audio_minutes: float,
+    speaker_count: int,
+    excluded_because: str = "",
+) -> str | None:
+    """Persist this recording's day-summary contribution. Returns the date key."""
+    stamp = SummaryMeta.from_filename(path.name).recorded_at
+    save_contribution(
+        transcript_dir,
+        Contribution(
+            source_file=path.name,
+            keep=keep,
+            text=text if keep else "",
+            audio_minutes=audio_minutes if keep else 0.0,
+            speaker_count=speaker_count if keep else 0,
+            recorded_at=isoformat(stamp),
+            excluded_because=excluded_because,
+        ),
+    )
+    return date_from_filename(path.name)
 
 
 def extract_into_queue(segments: list, path: Path, queue_path: str) -> list[str]:
@@ -113,6 +189,13 @@ def extract_into_queue(segments: list, path: Path, queue_path: str) -> list[str]
     while the queue held real items. Accepts CloudSegment or TranscribedSegment; only
     the fields both carry are used.
     """
+    segments = [
+        s for s in segments
+        if not (getattr(s, "unintelligible_because", "") or "").strip()
+    ]
+    if not segments:
+        print("  no intelligible segments; nothing queued")
+        return []
     joined = "\n\n".join(s.text for s in segments if s.text.strip())
     filtered = select(joined)
     if not filtered.passages:
@@ -144,21 +227,22 @@ def extract_into_queue(segments: list, path: Path, queue_path: str) -> list[str]
         # commitments with quote spans a few words longer or shorter, and the queue
         # doubled (6 pending for 3 real actions). A new quote that contains or is
         # contained by an existing pending quote is the same moment heard again.
-        from autowork.extract import quotes_overlap
-
         existing = [
-            a.provenance.transcript_excerpt
+            a
             for a in queue.list(status=Status.PENDING)
-            if a.provenance.source_audio == str(path)
+            if source_key(a) == path.name.lower()
         ]
         before = queue.counts().get("pending", 0)
         for record in accepted:
             quote = record.provenance.transcript_excerpt
-            if any(quotes_overlap(quote, known) for known in existing):
+            if any(quotes_overlap(quote, a.provenance.transcript_excerpt) for a in existing):
                 print(f"    = already pending (overlapping quote): {record.title[:60]}")
                 continue
+            if any(titles_overlap(record.title, a.title) for a in existing):
+                print(f"    = already pending (same to-do): {record.title[:60]}")
+                continue
             queued.append(queue.enqueue(record))
-            existing.append(quote)
+            existing.append(record)
         fresh = queue.counts().get("pending", 0) - before
     print(f"  queued {fresh} new action(s) "
           f"({len(accepted) - fresh} already known, {len(rejected)} rejected by grounding)")
@@ -179,6 +263,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-extract", action="store_true")
     parser.add_argument("--no-relevance", action="store_true",
                         help="skip the work-conversation check")
+    parser.add_argument(
+        "--force-keep",
+        action="store_true",
+        help="one-off operator override: summarise even if personal or garbled",
+    )
     parser.add_argument("--dry-run", action="store_true", help="gate only, no uploads")
     parser.add_argument("--to", default=None, help="summary recipient")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -242,21 +331,29 @@ def main(argv: list[str] | None = None) -> int:
         print("nothing new to process")
         return 0
 
+    processed_names = {p.name for p in paths}
+
     model = DEFAULT_MODEL if args.no_diarize else DIARIZE_MODEL
     gate = GateConfig()
     failures = 0
-    all_text: list[str] = []
     queued_ids: list[str] = []
-    meta_files: list[str] = []
-    meta_minutes = 0.0
-    meta_speaker_max = 0
-    first_recorded = None
+    dates_touched: set[str] = set()
+
+    def touch(date_key: str | None) -> None:
+        if date_key:
+            dates_touched.add(date_key)
 
     # --- 2. per recording -----------------------------------------------------
     for path in sorted(paths):
         target = transcript_dir / f"{path.stem}.md"
         if target.exists():
             print(f"{path.name}: transcript exists, not re-transcribing")
+            # Variants added after the first transcribe (Dave Cazal, OctoAdmin) live
+            # in the glossary but were never applied to this file. Re-run the same
+            # correct() pass the live transcriber uses; it is free and idempotent.
+            applied = glossary.rewrite_file(target)
+            if applied:
+                print(f"  glossary corrected: {', '.join(applied)}")
             # Parse the transcript back into segments and use the SPOKEN TEXT, never
             # the raw markdown. Feeding the raw file to the summariser doubled the
             # input (the by-speaker section repeats the whole conversation in
@@ -267,35 +364,80 @@ def main(argv: list[str] | None = None) -> int:
             cached_segments = parse_transcript(target)
             if not cached_segments:
                 print("  transcript holds no speech; skipping")
+                touch(note_contribution(
+                    transcript_dir, path, keep=False, text="",
+                    audio_minutes=0, speaker_count=0,
+                    excluded_because="transcript holds no speech",
+                ))
                 continue
-            cached = "\n\n".join(s.text for s in cached_segments)
+            if args.force_keep:
+                print("  --force-keep: not dropping personal/unintelligible segments")
+                cleaned_segs = []
+                for seg in cached_segments:
+                    cleaned, _ = assess(seg.text, getattr(seg, "speakers", None) or [])
+                    if cleaned.strip():
+                        seg.text = cleaned
+                        cleaned_segs.append(seg)
+                cached_segments = cleaned_segs
+                if not cached_segments:
+                    print("  excluded from the summary: nothing left after cleaning loops")
+                    touch(note_contribution(
+                        transcript_dir, path, keep=False, text="",
+                        audio_minutes=0, speaker_count=0,
+                        excluded_because="nothing left after cleaning loops",
+                    ))
+                    continue
+            else:
+                cached_segments, dropped_q = retain_intelligible(cached_segments)
+                for seg, reason in dropped_q:
+                    print(
+                        f"  dropped {seg.start_sec:.0f}s-{seg.end_sec:.0f}s: "
+                        f"unintelligible ({reason})"
+                    )
+                if not cached_segments:
+                    print("  excluded from the summary: no intelligible conversation")
+                    touch(note_contribution(
+                        transcript_dir, path, keep=False, text="",
+                        audio_minutes=0, speaker_count=0,
+                        excluded_because="no intelligible conversation",
+                    ))
+                    continue
+            cached = "\n\n".join(s.text for s in cached_segments if s.text.strip())
 
             # Still classify it. Skipping the check on the cached path would let an
             # irrelevant recording into the summary on every subsequent run purely
             # because it had been transcribed once -- the expensive stage is skipped,
             # but the cheap safety check must not be.
-            if not args.no_relevance:
+            if not args.no_relevance and not args.force_keep:
                 try:
                     cached_verdict = classify(cached)
                     if not cached_verdict.keep:
                         print(f"  excluded from the summary: {cached_verdict}")
+                        touch(note_contribution(
+                            transcript_dir, path, keep=False, text="",
+                            audio_minutes=0, speaker_count=0,
+                            excluded_because=str(cached_verdict),
+                        ))
                         continue
                 except RelevanceError as exc:
                     print(f"  relevance check failed, keeping anyway: {exc}",
                           file=sys.stderr)
-            all_text.append(cached)
-            meta_files.append(path.name)
-            cached_stamp = SummaryMeta.from_filename(path.name).recorded_at
-            if cached_stamp and (first_recorded is None or cached_stamp < first_recorded):
-                first_recorded = cached_stamp
+
+            touch(note_contribution(
+                transcript_dir, path, keep=True, text=cached,
+                audio_minutes=sum(s.duration_sec for s in cached_segments) / 60,
+                speaker_count=speaker_max(cached_segments),
+            ))
 
             # Extract on the cached path too. Extraction is seconds and cents, and the
             # queue's quote-based dedupe makes re-extraction idempotent -- while
             # SKIPPING it here twice produced an email with an empty to-do list while
             # real items existed (once after a crash, once after a queue rebuild).
             # Only transcription is expensive enough to deserve a cache.
-            if not args.no_extract:
+            if not args.no_extract and not args.force_keep:
                 queued_ids += extract_into_queue(cached_segments, path, args.queue)
+            elif args.force_keep:
+                print("  --force-keep: not extracting action items")
             continue
 
         print(f"\n{path.name}")
@@ -321,19 +463,38 @@ def main(argv: list[str] | None = None) -> int:
 
         if not segs:
             print("  gate rejected everything; nothing uploaded, nothing to transcribe")
+            touch(note_contribution(
+                transcript_dir, path, keep=False, text="",
+                audio_minutes=0, speaker_count=0,
+                excluded_because="gate rejected everything",
+            ))
             continue
 
-        # Relevance gate, PER SEGMENT. The audio gate proved there was speech-shaped
-        # signal; this asks whether each stretch is a work conversation. Per segment
-        # rather than per recording because both mixtures were real: a genuine meeting
-        # with an hour of podcast appended (one verdict would drop the meeting or admit
-        # the podcast), and ambient noise transcribed to plausible fragments. The full
-        # transcript is still written either way -- it is already paid for, and a
-        # dropped classification should be reviewable.
-        kept_segs = list(segs)
-        if not args.no_relevance:
-            kept_segs = []
+        if args.force_keep:
+            print("  --force-keep: not dropping personal/unintelligible segments")
             for seg in segs:
+                cleaned, _ = assess(seg.text, getattr(seg, "speakers", None) or [])
+                if cleaned.strip():
+                    seg.text = cleaned
+            intelligible = [s for s in segs if s.text.strip()]
+            dropped_q = []
+        else:
+            # Cheap intelligibility before the LLM relevance call. The 2026-08-27 11:30
+            # recording measured CLEAN at +4.9 dB and the classifier kept it "despite
+            # garbling" because work words appeared; 13 diarizer labels and a 59-copy
+            # Whisper loop are not a meeting. Dropped segments stay in the transcript.
+            intelligible, dropped_q = retain_intelligible(segs)
+        for seg, reason in dropped_q:
+            print(
+                f"  dropped {seg.start_sec:.0f}s-{seg.end_sec:.0f}s: "
+                f"unintelligible ({reason})"
+            )
+
+        # Relevance gate, PER SEGMENT, on what survived the cheap check.
+        kept_segs = list(intelligible)
+        if not args.no_relevance and not args.force_keep:
+            kept_segs = []
+            for seg in intelligible:
                 try:
                     verdict = classify(seg.text)
                 except RelevanceError as exc:
@@ -348,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  dropped {seg.start_sec:.0f}s-{seg.end_sec:.0f}s: {verdict}")
         joined_raw = "\n\n".join(s.text for s in kept_segs)
 
-        target.write_text(render_transcript(path, segs), encoding="utf-8")
+        target.write_text(render_transcript(path, segs, glossary), encoding="utf-8")
         uploaded = sum(s.uploaded_bytes for s in segs) / 1e6
         audio_min = sum(s.duration_sec for s in segs) / 60
         print(f"  transcribed {audio_min:.1f} min ({uploaded:.2f} MB uploaded) "
@@ -357,89 +518,157 @@ def main(argv: list[str] | None = None) -> int:
         # Everything downstream sees only the segments that survived relevance; the
         # dropped ones stay reviewable in the transcript file, which is already paid for.
         if not joined_raw.strip():
-            print("  no work conversation in this recording; excluded from the summary")
+            print("  no intelligible work conversation; excluded from the summary")
+            touch(note_contribution(
+                transcript_dir, path, keep=False, text="",
+                audio_minutes=0, speaker_count=0,
+                excluded_because="no intelligible work conversation",
+            ))
             continue
 
-        all_text.append(joined_raw)
-
-        # Metadata reflects what the summary covers, not everything transcribed.
-        meta_files.append(path.name)
-        meta_minutes += sum(s.duration_sec for s in kept_segs) / 60
-        # Speaker labels are PER REQUEST: chunk 1's "A" is not chunk 2's "A", so a
-        # union across chunks inflates the count (measured: a two-person call reported
-        # 4). The max within any single chunk is the defensible participant count.
-        for s in kept_segs:
-            distinct = {t["speaker"] for t in s.speakers if t.get("speaker")}
-            meta_speaker_max = max(meta_speaker_max, len(distinct))
-        stamp_from_name = SummaryMeta.from_filename(path.name).recorded_at
-        if stamp_from_name and (first_recorded is None or stamp_from_name < first_recorded):
-            first_recorded = stamp_from_name
+        touch(note_contribution(
+            transcript_dir, path, keep=True, text=joined_raw,
+            audio_minutes=sum(s.duration_sec for s in kept_segs) / 60,
+            speaker_count=speaker_max(kept_segs),
+        ))
 
         # --- 3. extract into the review queue --------------------------------
-        if not args.no_extract:
+        if not args.no_extract and not args.force_keep:
             queued_ids += extract_into_queue(kept_segs, path, args.queue)
+        elif args.force_keep:
+            print("  --force-keep: not extracting action items")
 
     if args.dry_run:
         print("\ndry run: nothing uploaded, nothing queued, no email sent")
         return 0
 
-    # --- 4. summarise the day -------------------------------------------------
-    combined = "\n\n".join(t for t in all_text if t.strip())
-    if not combined.strip():
+    # --- 4. one summary email per conversation --------------------------------
+    # A conversation is one recording, or several that overlap the SAME Outlook
+    # event. Same-sounding topics are not merged: that mixed a 25 Aug mapping
+    # call into a 26 Aug Okta email. Outstanding items from other days belong
+    # on the morning digest, not here.
+    if not dates_touched:
         print("\nno transcript text; no summary, no email")
         return 1 if failures else 0
 
-    try:
-        summary = summarise(combined, recorded_at=first_recorded)
-    except SummaryError as exc:
-        print(f"\nsummary failed: {exc}", file=sys.stderr)
-        return 1
-
-    # Factual header: every value derived from files and the diarizer, none generated.
-    summary.meta = SummaryMeta(
-        recorded_at=first_recorded,
-        source_files=meta_files,
-        audio_minutes=meta_minutes,
-        speaker_count=meta_speaker_max,
-    )
-
-    # The email carries EVERY action still awaiting review, not only the ones this run
-    # queued. Measured failure: a crashed run queued three items, the re-run used the
-    # cached transcripts and so extracted nothing, and the email went out with no to-do
-    # list while the queue silently held all three. The queue is the single source of
-    # truth; the email is a view of it. Items you have already approved or rejected do
-    # not reappear.
     with ReviewQueue(args.queue) as queue:
-        actions = queue.list(status=Status.PENDING)
+        pending = queue.list(status=Status.PENDING)
 
-    print(f"\nsummary: {summary.headline}")
-    print(f"  {summary.backend}, {summary.elapsed_sec:.1f}s, "
-          f"{summary.input_tokens} in / {summary.output_tokens} out")
-
-    stamp = datetime.now().strftime("%Y-%m-%d")
-    summary_path = transcript_dir.parent / "summaries" / f"{stamp}.md"
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(summary.to_markdown(actions=actions), encoding="utf-8")
-    print(f"  saved {summary_path}")
-
-    # --- 5. email -------------------------------------------------------------
-    if args.no_email:
-        print("  --no-email: not sending")
-        return 1 if failures else 0
     recipient = recipient or default_recipient()
-    if not recipient:
-        print("  no recipient (set SUMMARY_TO in .env); not sending", file=sys.stderr)
-        return 1 if failures else 0
+    summarised = 0
+    all_contribs = []
+    for date_key in sorted(dates_touched):
+        all_contribs.extend(load_kept_for_date(transcript_dir, date_key))
 
-    body = summary.to_text(actions=actions)
-    subject = f"Work summary {summary.meta.date_only}: {summary.headline[:60]}"
-    try:
-        print("  " + send(recipient, subject, body,
-                          html_body=summary.to_html(actions=actions)))
-    except MailError as exc:
-        print(f"  email failed: {exc}", file=sys.stderr)
-        return 1
+    matches: dict = {}
+    for contrib in all_contribs:
+        if contrib.recorded_datetime is None:
+            matches[contrib.source_file] = None
+            continue
+        matched = match_recording(contrib.recorded_datetime, contrib.audio_minutes)
+        matches[contrib.source_file] = matched
+        if matched is not None:
+            print(f"  calendar {contrib.source_file}: {matched.subject or '(no title)'} "
+                  f"({len(matched.invitees)} invitees)")
 
+    convos = group_conversations(all_contribs, matches)
+    if args.force_keep and args.files:
+        forced = [
+            c for c in all_contribs
+            if c.keep and c.source_file in processed_names
+        ]
+        if forced:
+            convos = [Conversation(contribs=forced, group_key="force-keep")]
+
+    for convo in convos:
+        if not any(name in processed_names for name in convo.source_files):
+            continue
+        combined = convo.text
+        if not combined.strip():
+            continue
+        try:
+            extra = FORCE_KEEP_PROMPT if args.force_keep else ""
+            summary = summarise(
+                combined,
+                recorded_at=convo.meta.recorded_at,
+                glossary=glossary,
+                require_intelligible=not args.force_keep,
+                extra_instructions=extra,
+            )
+        except SummaryError as exc:
+            print(f"\n{convo.source_files}: summary failed: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+
+        summary.meta = convo.meta
+        summary.clarify_terms = glossary.unknown_proper_nouns(
+            combined, min_occurrences=2
+        )
+        summary.apply_glossary(glossary)
+        if args.force_keep:
+            convo_actions = []
+        else:
+            convo_actions = apply_glossary_all(
+                [
+                    a for a in pending
+                    if Path(a.provenance.source_audio).name in set(convo.source_files)
+                ],
+                glossary,
+            )
+
+        stamp = summary.meta.date_only
+        time_bit = (
+            summary.meta.recorded_at.strftime("%H-%M")
+            if summary.meta.recorded_at else "unknown"
+        )
+        print(f"\nsummary {stamp} {time_bit}: {summary.headline}")
+        print(f"  {summary.backend}, {summary.elapsed_sec:.1f}s, "
+              f"{summary.input_tokens} in / {summary.output_tokens} out")
+        print(f"  files: {', '.join(convo.source_files)}")
+
+        summary_path = (
+            transcript_dir.parent / "summaries" / f"{stamp}-{time_bit}.md"
+        )
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(
+            summary.to_markdown(actions=convo_actions), encoding="utf-8"
+        )
+        print(f"  saved {summary_path}")
+        summarised += 1
+
+        if (
+            not args.force_keep
+            and not summary.topics
+            and not summary.decisions
+            and not convo_actions
+        ):
+            print("  garbled or empty: not emailing a fake meeting")
+            continue
+
+        if args.no_email:
+            print("  --no-email: not sending")
+            continue
+        if not recipient:
+            print("  no recipient (set SUMMARY_TO in .env); not sending", file=sys.stderr)
+            failures += 1
+            continue
+
+        if summary.meta.meeting_title:
+            subject = (
+                f"Meeting {stamp}: {summary.meta.meeting_title[:70]}"
+            )
+        else:
+            subject = f"Call {stamp} {time_bit.replace('-', ':')}: {summary.headline[:50]}"
+        body = summary.to_text(actions=convo_actions)
+        try:
+            print("  " + send(recipient, subject, body,
+                              html_body=summary.to_html(actions=convo_actions)))
+        except MailError as exc:
+            print(f"  email failed: {exc}", file=sys.stderr)
+            failures += 1
+
+    if summarised == 0 and failures == 0:
+        return 0
     return 1 if failures else 0
 
 
