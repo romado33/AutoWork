@@ -30,7 +30,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from autowork.gate import GateConfig, GateError, Segment, Verdict, measure, segments
+from autowork.gate import GateConfig, Segment, Verdict, measure, segments
 from autowork.glossary import Glossary
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,8 @@ class TranscribedSegment:
     glossary_applied: list[str] = field(default_factory=list)
     prompt_used: bool = False
     repetition_flagged: bool = False
+    speakers: list[dict] = field(default_factory=list)
+    unintelligible_because: str = ""
 
     @property
     def duration_sec(self) -> float:
@@ -178,6 +180,79 @@ def excise_repetition_loops(
     return " ".join(kept), removed
 
 
+# Intra-sentence loops have no period, so the sentence splitter above never sees them.
+# Measured 2026-08-27: "I'm not sure if like the I'll start ahead and see if I can"
+# x59 as one run-on in a 10-minute upload. min 4 words so "yeah yeah yeah" is untouched.
+_PHRASE_MIN_N = 4
+_PHRASE_MAX_N = 20
+
+
+def excise_consecutive_phrase_runs(
+    text: str, max_repeats: int = MAX_PHRASE_REPEATS
+) -> tuple[str, int, int]:
+    """Collapse consecutive n-gram loops that have no sentence boundaries.
+
+    Returns (cleaned, copies_removed, longest_run). longest_run is the largest
+    number of consecutive copies seen, including the ones kept, so a caller can
+    decide the decoder lost lock even after the extras are deleted.
+    """
+    spans = [(m.start(), m.end()) for m in re.finditer(r"[A-Za-z0-9']+", text)]
+    if len(spans) < _PHRASE_MIN_N * (max_repeats + 1):
+        return text, 0, 0
+
+    keys = [text[start:end].lower() for start, end in spans]
+    drop: set[int] = set()
+    removed = 0
+    longest = 0
+    i = 0
+    n_words = len(keys)
+    while i < n_words:
+        if i in drop:
+            i += 1
+            continue
+        matched = False
+        max_n = min(_PHRASE_MAX_N, (n_words - i) // (max_repeats + 1))
+        for n in range(max_n, _PHRASE_MIN_N - 1, -1):
+            phrase = keys[i : i + n]
+            run = 1
+            j = i + n
+            while j + n <= n_words and keys[j : j + n] == phrase:
+                run += 1
+                j += n
+            if run > longest:
+                longest = run
+            if run > max_repeats:
+                for copy in range(max_repeats, run):
+                    drop.update(range(i + copy * n, i + (copy + 1) * n))
+                    removed += 1
+                i = i + n * run
+                matched = True
+                break
+        if not matched:
+            i += 1
+
+    if not drop:
+        return text, 0, longest
+
+    ranges: list[tuple[int, int]] = []
+    for idx in sorted(drop):
+        start, end = spans[idx]
+        if ranges and start <= ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
+        else:
+            ranges.append((start, end))
+
+    out: list[str] = []
+    pos = 0
+    for start, end in ranges:
+        out.append(text[pos:start])
+        pos = end
+    out.append(text[pos:])
+    cleaned = re.sub(r"[ \t]{2,}", " ", "".join(out))
+    cleaned = re.sub(r" ?\n ?", "\n", cleaned)
+    return cleaned.strip(), removed, longest
+
+
 def _slice_audio(source: Path, start_sec: float, end_sec: float, dest: Path) -> None:
     """Extract one segment to 16 kHz mono wav, which is what Whisper consumes."""
     cmd = [
@@ -260,6 +335,8 @@ def transcribe_file(
         source.name, total, len(windows) * config.gate.window_sec, len(keep),
     )
 
+    from autowork.quality import assess
+
     prompt = glossary.prompt_text() if glossary else ""
     results: list[TranscribedSegment] = []
 
@@ -275,15 +352,7 @@ def transcribe_file(
                 prompt=prompt if use_prompt else None, threads=config.threads,
             )
 
-            text, removed = excise_repetition_loops(text)
-            if removed:
-                logger.warning(
-                    "%s [%.0fs-%.0fs]: removed %d looped sentence(s) despite the "
-                    "segment passing the gate (%s, %+.1f dB). The surrounding speech "
-                    "is kept.",
-                    source.name, segment.start_sec, segment.end_sec, removed,
-                    segment.verdict.value, segment.mean_delta_db,
-                )
+            text, unintelligible = assess(text, [])
 
             applied: list[str] = []
             if glossary and text:
@@ -298,10 +367,8 @@ def transcribe_file(
                 )
                 continue
 
-            # Checked AFTER excision: if a loop still dominates what remains, the
-            # segment is not merely tainted at one end, it is substantially fabricated.
-            looping = looks_like_repetition_loop(text)
-            if looping:
+            looping = looks_like_repetition_loop(text) or bool(unintelligible)
+            if looping and not unintelligible:
                 logger.warning(
                     "%s [%.0fs-%.0fs]: repetition still dominates after excision. "
                     "Treat this text as unverified.",
@@ -319,6 +386,7 @@ def transcribe_file(
                     glossary_applied=applied,
                     prompt_used=use_prompt,
                     repetition_flagged=looping,
+                    unintelligible_because=unintelligible or "",
                 )
             )
 

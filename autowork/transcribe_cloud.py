@@ -40,6 +40,7 @@ from pathlib import Path
 
 from autowork.gate import GateConfig, GateError, Segment, measure, segments
 from autowork.glossary import Glossary
+from autowork.quality import assess
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ class CloudSegment:
     glossary_applied: list[str] = field(default_factory=list)
     uploaded_bytes: int = 0
     elapsed_sec: float = 0.0
+    unintelligible_because: str = ""
 
     @property
     def duration_sec(self) -> float:
@@ -310,6 +312,8 @@ def transcribe_file_cloud(
                 )
                 return None
 
+            text, unintelligible = assess(text, speakers)
+
             applied: list[str] = []
             if glossary:
                 # Glossary.correct compiles fresh patterns per call and mutates
@@ -331,6 +335,7 @@ def transcribe_file_cloud(
                 glossary_applied=applied,
                 uploaded_bytes=size,
                 elapsed_sec=elapsed,
+                unintelligible_because=unintelligible or "",
             )
 
         from concurrent.futures import ThreadPoolExecutor
