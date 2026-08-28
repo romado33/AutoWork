@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -12,8 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 from autowork.day import (
     Contribution,
     combine_text,
+    contrib_path,
     date_from_filename,
     isoformat,
+    load_contribution,
     load_kept_for_date,
     meta_from_contribs,
     save_contribution,
@@ -84,6 +87,63 @@ def test_speaker_count_is_max_not_sum(tmp_path: Path) -> None:
     save_contribution(tmp_path, a)
     save_contribution(tmp_path, b)
     assert meta_from_contribs(load_kept_for_date(tmp_path, "2026-08-26")).speaker_count == 2
+
+
+def test_forced_contribution_stays_out_of_a_normal_rebuild(tmp_path: Path) -> None:
+    """--force-keep is a ONE-TIME override, not a permanent keep.
+
+    The 2026-08-27 11:30 and 12:31 personal recordings were forced through and
+    their sidecars stayed on disk as keep=True with 60k characters of garbled
+    speech. Any later recording sharing their Outlook event would have merged
+    that text into a work summary email -- the exact content the relevance gate
+    exists to keep out, arriving through the day rebuild.
+    """
+    work = contrib("R2026-08-27-14-00-00.MP3", "Okta access review with Andrew.")
+    personal = contrib("R2026-08-27-11-30-55.MP3", "Are you guys all set for food?")
+    personal.forced = True
+    save_contribution(tmp_path, work)
+    save_contribution(tmp_path, personal)
+
+    kept = load_kept_for_date(tmp_path, "2026-08-27")
+    assert [c.source_file for c in kept] == ["R2026-08-27-14-00-00.MP3"]
+    assert "food" not in combine_text(kept)
+
+
+def test_forced_contribution_is_visible_to_the_run_that_forced_it(tmp_path: Path) -> None:
+    """The override run still has to be able to email its own summary."""
+    personal = contrib("R2026-08-27-11-30-55.MP3", "Are you guys all set for food?")
+    personal.forced = True
+    save_contribution(tmp_path, personal)
+
+    assert load_kept_for_date(tmp_path, "2026-08-27") == []
+    forced = load_kept_for_date(tmp_path, "2026-08-27", include_forced=True)
+    assert [c.source_file for c in forced] == ["R2026-08-27-11-30-55.MP3"]
+
+
+def test_forced_survives_the_json_round_trip(tmp_path: Path) -> None:
+    personal = contrib("R2026-08-27-12-31-02.MP3", "Personal catch-up.")
+    personal.forced = True
+    save_contribution(tmp_path, personal)
+    reloaded = load_contribution(contrib_path(tmp_path, "R2026-08-27-12-31-02.MP3"))
+    assert reloaded.forced is True
+
+
+def test_sidecar_written_before_forced_existed_is_not_forced(tmp_path: Path) -> None:
+    """Old sidecars have no 'forced' key; they must load as ordinary keeps."""
+    path = tmp_path / "R2026-08-26-09-04-45.contrib.json"
+    path.write_text(
+        json.dumps(
+            {
+                "source_file": "R2026-08-26-09-04-45.MP3",
+                "keep": True,
+                "text": "Okta access review with Andrew.",
+                "recorded_at": "2026-08-26T09:04:45",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_contribution(path).forced is False
+    assert len(load_kept_for_date(tmp_path, "2026-08-26")) == 1
 
 
 def test_corrupt_sidecar_does_not_abort_the_day(tmp_path: Path) -> None:

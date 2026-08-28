@@ -58,7 +58,7 @@ from autowork.mailer import MailError, default_recipient, send  # noqa: E402
 from autowork.prefilter import select  # noqa: E402
 from autowork.quality import assess, retain_intelligible, speaker_count_for_header  # noqa: E402
 from autowork.action import Status  # noqa: E402
-from autowork.queue import ReviewQueue  # noqa: E402
+from autowork.queue import QueueError, ReviewQueue  # noqa: E402
 from autowork.relevance import RelevanceError, classify  # noqa: E402
 from autowork.summarize import SummaryError, SummaryMeta, summarise  # noqa: E402
 from autowork.transcribe import TranscribedSegment  # noqa: E402
@@ -70,6 +70,7 @@ from autowork.transcribe_cloud import (  # noqa: E402
 )
 from autowork.day import (  # noqa: E402
     Contribution,
+    DayError,
     clarify_markdown,
     date_from_filename,
     isoformat,
@@ -163,6 +164,7 @@ def note_contribution(
     audio_minutes: float,
     speaker_count: int,
     excluded_because: str = "",
+    forced: bool = False,
 ) -> str | None:
     """Persist this recording's day-summary contribution. Returns the date key."""
     stamp = SummaryMeta.from_filename(path.name).recorded_at
@@ -176,9 +178,37 @@ def note_contribution(
             speaker_count=speaker_count if keep else 0,
             recorded_at=isoformat(stamp),
             excluded_because=excluded_because,
+            forced=forced and keep,
         ),
     )
     return date_from_filename(path.name)
+
+
+def keep_relevant(segments: list) -> tuple[list, list[tuple[object, object]]]:
+    """Relevance gate, PER SEGMENT. Returns (kept, [(segment, verdict), ...]).
+
+    One helper for both paths. The cached path used to classify the JOINED text
+    instead, so a recording with one work segment beside one personal segment was
+    keepable on first transcribe and droppable on re-run -- the verdict depended
+    on which branch happened to run, not on what was said.
+
+    A classifier that cannot answer keeps the segment: an unusable classifier must
+    not be able to silently discard a real day.
+    """
+    kept: list = []
+    dropped: list[tuple[object, object]] = []
+    for seg in segments:
+        try:
+            verdict = classify(seg.text)
+        except RelevanceError as exc:
+            print(f"  relevance check failed, keeping anyway: {exc}", file=sys.stderr)
+            kept.append(seg)
+            continue
+        if verdict.keep:
+            kept.append(seg)
+        else:
+            dropped.append((seg, verdict))
+    return kept, dropped
 
 
 def extract_into_queue(segments: list, path: Path, queue_path: str) -> list[str]:
@@ -336,7 +366,6 @@ def main(argv: list[str] | None = None) -> int:
     model = DEFAULT_MODEL if args.no_diarize else DIARIZE_MODEL
     gate = GateConfig()
     failures = 0
-    queued_ids: list[str] = []
     dates_touched: set[str] = set()
 
     def touch(date_key: str | None) -> None:
@@ -344,8 +373,34 @@ def main(argv: list[str] | None = None) -> int:
             dates_touched.add(date_key)
 
     # --- 2. per recording -----------------------------------------------------
-    for path in sorted(paths):
+    def process_recording(path: Path) -> None:
+        """One recording: transcribe or reuse, gate, note the contribution, queue.
+
+        Nested so it keeps this run's configuration in scope, and called inside a
+        try/except so one locked transcript or busy queue skips that recording
+        rather than abandoning every recording after it.
+        """
+        nonlocal failures
         target = transcript_dir / f"{path.stem}.md"
+
+        if args.dry_run:
+            # Checked BEFORE the cached branch. Sitting after it meant a dry run
+            # still rewrote glossaries, wrote sidecars and queued actions for every
+            # file that already had a transcript, which is not a dry run.
+            print(f"\n{path.name}")
+            if target.exists():
+                print("  transcript exists; nothing would be uploaded")
+                return
+            from autowork.gate import measure, segments
+
+            windows = measure(path, gate)
+            keep = segments(windows, gate)
+            kept = sum(s.duration_sec for s in keep)
+            total = len(windows) * gate.window_sec
+            print(f"  gate: would upload {kept / 60:.1f} of {total / 60:.1f} min "
+                  f"({100 * kept / total if total else 0:.0f}%) in {len(keep)} segment(s)")
+            return
+
         if target.exists():
             print(f"{path.name}: transcript exists, not re-transcribing")
             # Variants added after the first transcribe (Dave Cazal, OctoAdmin) live
@@ -369,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
                     audio_minutes=0, speaker_count=0,
                     excluded_because="transcript holds no speech",
                 ))
-                continue
+                return
             if args.force_keep:
                 print("  --force-keep: not dropping personal/unintelligible segments")
                 cleaned_segs = []
@@ -386,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
                         audio_minutes=0, speaker_count=0,
                         excluded_because="nothing left after cleaning loops",
                     ))
-                    continue
+                    return
             else:
                 cached_segments, dropped_q = retain_intelligible(cached_segments)
                 for seg, reason in dropped_q:
@@ -401,32 +456,32 @@ def main(argv: list[str] | None = None) -> int:
                         audio_minutes=0, speaker_count=0,
                         excluded_because="no intelligible conversation",
                     ))
-                    continue
-            cached = "\n\n".join(s.text for s in cached_segments if s.text.strip())
+                    return
 
             # Still classify it. Skipping the check on the cached path would let an
             # irrelevant recording into the summary on every subsequent run purely
             # because it had been transcribed once -- the expensive stage is skipped,
-            # but the cheap safety check must not be.
+            # but the cheap safety check must not be. Per segment, exactly as the
+            # fresh path does it.
             if not args.no_relevance and not args.force_keep:
-                try:
-                    cached_verdict = classify(cached)
-                    if not cached_verdict.keep:
-                        print(f"  excluded from the summary: {cached_verdict}")
-                        touch(note_contribution(
-                            transcript_dir, path, keep=False, text="",
-                            audio_minutes=0, speaker_count=0,
-                            excluded_because=str(cached_verdict),
-                        ))
-                        continue
-                except RelevanceError as exc:
-                    print(f"  relevance check failed, keeping anyway: {exc}",
-                          file=sys.stderr)
+                cached_segments, dropped_rel = keep_relevant(cached_segments)
+                for seg, verdict in dropped_rel:
+                    print(f"  dropped {seg.start_sec:.0f}s-{seg.end_sec:.0f}s: {verdict}")
+                if not cached_segments:
+                    print("  excluded from the summary: no work conversation")
+                    touch(note_contribution(
+                        transcript_dir, path, keep=False, text="",
+                        audio_minutes=0, speaker_count=0,
+                        excluded_because="no work conversation",
+                    ))
+                    return
 
+            cached = "\n\n".join(s.text for s in cached_segments if s.text.strip())
             touch(note_contribution(
                 transcript_dir, path, keep=True, text=cached,
                 audio_minutes=sum(s.duration_sec for s in cached_segments) / 60,
                 speaker_count=speaker_max(cached_segments),
+                forced=args.force_keep,
             ))
 
             # Extract on the cached path too. Extraction is seconds and cents, and the
@@ -435,23 +490,12 @@ def main(argv: list[str] | None = None) -> int:
             # real items existed (once after a crash, once after a queue rebuild).
             # Only transcription is expensive enough to deserve a cache.
             if not args.no_extract and not args.force_keep:
-                queued_ids += extract_into_queue(cached_segments, path, args.queue)
+                extract_into_queue(cached_segments, path, args.queue)
             elif args.force_keep:
                 print("  --force-keep: not extracting action items")
-            continue
+            return
 
         print(f"\n{path.name}")
-        if args.dry_run:
-            from autowork.gate import measure, segments
-
-            windows = measure(path, gate)
-            keep = segments(windows, gate)
-            kept = sum(s.duration_sec for s in keep)
-            total = len(windows) * gate.window_sec
-            print(f"  gate: would upload {kept / 60:.1f} of {total / 60:.1f} min "
-                  f"({100 * kept / total if total else 0:.0f}%) in {len(keep)} segment(s)")
-            continue
-
         try:
             segs = transcribe_file_cloud(
                 path, model=model, gate=gate, glossary=glossary
@@ -459,7 +503,7 @@ def main(argv: list[str] | None = None) -> int:
         except CloudTranscriptionError as exc:
             print(f"  transcription failed: {exc}", file=sys.stderr)
             failures += 1
-            continue
+            return
 
         if not segs:
             print("  gate rejected everything; nothing uploaded, nothing to transcribe")
@@ -468,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
                 audio_minutes=0, speaker_count=0,
                 excluded_because="gate rejected everything",
             ))
-            continue
+            return
 
         if args.force_keep:
             print("  --force-keep: not dropping personal/unintelligible segments")
@@ -493,20 +537,9 @@ def main(argv: list[str] | None = None) -> int:
         # Relevance gate, PER SEGMENT, on what survived the cheap check.
         kept_segs = list(intelligible)
         if not args.no_relevance and not args.force_keep:
-            kept_segs = []
-            for seg in intelligible:
-                try:
-                    verdict = classify(seg.text)
-                except RelevanceError as exc:
-                    # An unusable classifier must not silently discard the day.
-                    print(f"  relevance check failed, keeping anyway: {exc}",
-                          file=sys.stderr)
-                    kept_segs.append(seg)
-                    continue
-                if verdict.keep:
-                    kept_segs.append(seg)
-                else:
-                    print(f"  dropped {seg.start_sec:.0f}s-{seg.end_sec:.0f}s: {verdict}")
+            kept_segs, dropped_rel = keep_relevant(intelligible)
+            for seg, verdict in dropped_rel:
+                print(f"  dropped {seg.start_sec:.0f}s-{seg.end_sec:.0f}s: {verdict}")
         joined_raw = "\n\n".join(s.text for s in kept_segs)
 
         target.write_text(render_transcript(path, segs, glossary), encoding="utf-8")
@@ -524,19 +557,30 @@ def main(argv: list[str] | None = None) -> int:
                 audio_minutes=0, speaker_count=0,
                 excluded_because="no intelligible work conversation",
             ))
-            continue
+            return
 
         touch(note_contribution(
             transcript_dir, path, keep=True, text=joined_raw,
             audio_minutes=sum(s.duration_sec for s in kept_segs) / 60,
             speaker_count=speaker_max(kept_segs),
+            forced=args.force_keep,
         ))
 
         # --- 3. extract into the review queue --------------------------------
         if not args.no_extract and not args.force_keep:
-            queued_ids += extract_into_queue(kept_segs, path, args.queue)
+            extract_into_queue(kept_segs, path, args.queue)
         elif args.force_keep:
             print("  --force-keep: not extracting action items")
+
+    for path in sorted(paths):
+        try:
+            process_recording(path)
+        except (OSError, QueueError, DayError, GlossaryError) as exc:
+            # A locked transcript, a full disk or a busy SQLite file is one bad
+            # recording, not a reason to abandon the rest of the day's audio.
+            print(f"{path.name}: skipped after an unexpected failure: {exc}",
+                  file=sys.stderr)
+            failures += 1
 
     if args.dry_run:
         print("\ndry run: nothing uploaded, nothing queued, no email sent")
@@ -558,7 +602,13 @@ def main(argv: list[str] | None = None) -> int:
     summarised = 0
     all_contribs = []
     for date_key in sorted(dates_touched):
-        all_contribs.extend(load_kept_for_date(transcript_dir, date_key))
+        # Only the run that forced a recording through may see its sidecar. Later
+        # runs rebuild the day from recordings that actually passed the gates.
+        all_contribs.extend(
+            load_kept_for_date(
+                transcript_dir, date_key, include_forced=args.force_keep
+            )
+        )
 
     matches: dict = {}
     for contrib in all_contribs:

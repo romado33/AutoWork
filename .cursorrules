@@ -3,7 +3,7 @@
 Pocket voice recorder -> ingest by volume serial -> audio quality gate -> cloud
 transcription with diarization -> relevance gate -> summary email + grounded action
 items in a human review queue. Python 3.11+, three deps (openai, PyYAML, pytest),
-ffmpeg required. Run tests: `python -m pytest tests -q` (250 passing; keep it that way).
+ffmpeg required. Run tests: `python -m pytest tests -q` (260 passing; keep it that way).
 
 ## Safety invariants — never weaken these
 
@@ -80,5 +80,16 @@ ffmpeg required. Run tests: `python -m pytest tests -q` (250 passing; keep it th
   topic clustering). Weekday 07:30 sends the outstanding digest. Review UI:
   `scripts\review-ui.bat` (127.0.0.1 only). Mark done drops an item from the
   morning email; no executor runs. Approve stays on the digest until done.
+- `--force-keep` is a ONE-TIME override. Its sidecar is written `forced: true` and day
+ rebuilds skip it; only the run that forced it passes `include_forced`. Without that
+ the 2026-08-27 personal recordings sat on disk as keep=true and the next recording
+ sharing their Outlook event would have merged 60k chars of garble into a work email.
+- `--dry-run` is checked BEFORE the cached-transcript branch. It used to sit after,
+ so a "dry" run still rewrote glossaries, wrote sidecars and queued actions.
+- The relevance gate runs PER SEGMENT on both the fresh and cached paths (`keep_relevant`).
+ Classifying the joined text made one recording keepable on transcribe and droppable
+ on re-run. Per-recording failures (OSError/QueueError/DayError) skip that recording only.
+- Tests must never reach live Outlook: stub `match_recording`. The suite was
+ Dispatching COM per run and Windows logged fatal exception 0x80010001.
 - Every functional change updates tests or states why none is needed. Failure-mode
-  tests quote the verbatim strings from real incidents.
+ tests quote the verbatim strings from real incidents.

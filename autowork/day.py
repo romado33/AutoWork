@@ -38,6 +38,11 @@ class Contribution:
     speaker_count: int = 0
     recorded_at: str | None = None
     excluded_because: str = ""
+    # Kept by operator override (--force-keep), not by passing the gates. Excluded
+    # from day rebuilds so a one-time exception stays one time: the 2026-08-27
+    # personal recordings sat here as keep=True and would have been merged into a
+    # later work summary by whichever recording shared their Outlook event.
+    forced: bool = False
 
     @property
     def recorded_datetime(self) -> datetime | None:
@@ -99,14 +104,23 @@ def load_contribution(path: Path) -> Contribution:
         speaker_count=int(raw.get("speaker_count") or 0),
         recorded_at=raw.get("recorded_at") or None,
         excluded_because=str(raw.get("excluded_because") or ""),
+        # Absent in sidecars written before the override existed: an old keep is
+        # an ordinary keep.
+        forced=bool(raw.get("forced")),
     )
 
 
-def load_kept_for_date(transcript_dir: Path, date_key: str) -> list[Contribution]:
+def load_kept_for_date(
+    transcript_dir: Path, date_key: str, include_forced: bool = False
+) -> list[Contribution]:
     """Every kept contribution for this calendar date, in filename order.
 
     Missing or unreadable sidecars are skipped with no contribution -- a corrupt
     file must not abort the rest of the day, and must not be treated as 'keep'.
+
+    Operator-forced contributions are excluded unless asked for. Only the run that
+    passed --force-keep may see them; every later run must rebuild the day from
+    recordings that actually passed the gates.
     """
     if not transcript_dir.is_dir():
         return []
@@ -115,6 +129,8 @@ def load_kept_for_date(transcript_dir: Path, date_key: str) -> list[Contribution
         try:
             contrib = load_contribution(path)
         except DayError:
+            continue
+        if contrib.forced and not include_forced:
             continue
         if contrib.keep and contrib.date_key == date_key and contrib.text.strip():
             kept.append(contrib)
