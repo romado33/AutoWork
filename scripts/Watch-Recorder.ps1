@@ -36,13 +36,23 @@
 param(
     [Parameter(Mandatory = $true)][string]$Serial,
     [Parameter(Mandatory = $true)][string]$ProjectDir,
-    [string]$Python = "C:\Python313\python.exe",
+    [string]$Python = "",
     [int]$SettleSeconds = 8,
     [switch]$Once
 )
 
 $ErrorActionPreference = "Stop"
 $Serial = $Serial.ToUpper().Replace("-", "")
+if (-not $Python) {
+    $venvPy = Join-Path $ProjectDir ".venv\Scripts\python.exe"
+    if (Test-Path $venvPy) {
+        $Python = $venvPy
+    } else {
+        $found = Get-Command python -ErrorAction SilentlyContinue
+        if ($found) { $Python = $found.Source }
+        else { throw "python.exe not found: pass -Python or run scripts\setup.bat" }
+    }
+}
 $LogDir = Join-Path $ProjectDir "logs"
 $null = New-Item -ItemType Directory -Force -Path $LogDir
 

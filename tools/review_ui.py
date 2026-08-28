@@ -101,6 +101,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
     padding: 1px 8px; color: var(--muted); vertical-align: 2px;
   }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; align-items: center; }
+  .source-bar {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    margin: 0 0 8px; padding: 8px 12px; background: #efe8db;
+    border-radius: 8px; font-size: 0.85rem; color: var(--muted);
+  }
+  .source-bar .note { width: 100%; }
   button {
     font: inherit; border-radius: 8px; padding: 8px 14px; cursor: pointer; border: 1px solid var(--line);
     background: var(--card);
@@ -163,6 +169,10 @@ async function load() {
   render(data.groups || []);
 }
 
+function sourceNoteId(src) {
+  return "note-source-" + encodeURIComponent(src);
+}
+
 function render(groups) {
   const root = $("list");
   if (!groups.length) {
@@ -171,9 +181,28 @@ function render(groups) {
       : "<div class='empty'>Nothing closed yet.</div>";
     return;
   }
-  root.innerHTML = groups.map(g =>
-    "<div class='day'>" + esc(g.date) + "</div>" + g.items.map(card).join("")
-  ).join("");
+  root.innerHTML = groups.map(g => {
+    const bySource = {};
+    const order = [];
+    for (const item of (g.items || [])) {
+      const src = item.source || "unknown";
+      if (!bySource[src]) { bySource[src] = []; order.push(src); }
+      bySource[src].push(item);
+    }
+    return "<div class='day'>" + esc(g.date) + "</div>" + order.map(src => {
+      const items = bySource[src];
+      const nid = sourceNoteId(src);
+      const bar = view === "outstanding"
+        ? ("<div class='source-bar'><span>" + esc(src) + " · " + items.length +
+           " item(s)</span>" +
+           "<button class='danger' data-act='reject-source-toggle' data-source='" +
+           esc(src) + "'>Reject this recording</button>" +
+           "<textarea class='note' id='" + nid +
+           "' rows='2' placeholder='Why reject this recording? Required.'></textarea></div>")
+        : ("<div class='source-bar'><span>" + esc(src) + "</span></div>");
+      return bar + items.map(card).join("");
+    }).join("");
+  }).join("");
 }
 
 function card(item) {
@@ -205,9 +234,9 @@ $("tab-closed").onclick = () => { view = "closed"; $("tab-closed").setAttribute(
 document.addEventListener("click", async (ev) => {
   const btn = ev.target.closest("button[data-act]");
   if (!btn) return;
-  const id = btn.getAttribute("data-id");
   const act = btn.getAttribute("data-act");
   if (act === "reject-toggle") {
+    const id = btn.getAttribute("data-id");
     const box = $("note-" + id);
     const opening = !box.classList.contains("show");
     document.querySelectorAll(".note").forEach(n => n.classList.remove("show"));
@@ -219,13 +248,38 @@ document.addEventListener("click", async (ev) => {
     }
     return;
   }
-  const note = ($("note-" + id) || {}).value || "";
+  if (act === "reject-source-toggle") {
+    const src = btn.getAttribute("data-source");
+    const box = document.getElementById(sourceNoteId(src));
+    const opening = !box.classList.contains("show");
+    document.querySelectorAll(".note").forEach(n => n.classList.remove("show"));
+    if (opening) {
+      box.classList.add("show");
+      btn.textContent = "Confirm reject this recording";
+      btn.setAttribute("data-act", "reject-source");
+      box.focus();
+    }
+    return;
+  }
   btn.disabled = true;
-  const res = await fetch("/api/item/" + encodeURIComponent(id) + "/" + act, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({note}),
-  });
+  let res;
+  if (act === "reject-source") {
+    const src = btn.getAttribute("data-source");
+    const note = (document.getElementById(sourceNoteId(src)) || {}).value || "";
+    res = await fetch("/api/source/reject", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({source: src, note}),
+    });
+  } else {
+    const id = btn.getAttribute("data-id");
+    const note = ($("note-" + id) || {}).value || "";
+    res = await fetch("/api/item/" + encodeURIComponent(id) + "/" + act, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({note}),
+    });
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     $("error").hidden = false;
@@ -342,13 +396,6 @@ class ReviewUIHandler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         parts = [p for p in parsed.path.split("/") if p]
-        if len(parts) != 4 or parts[0] != "api" or parts[1] != "item":
-            self._json(404, {"error": "not found"})
-            return
-        action_id, verb = parts[2], parts[3]
-        if verb not in {"done", "approve", "reject", "retry"}:
-            self._json(404, {"error": "not found"})
-            return
         length = int(self.headers.get("Content-Length") or "0")
         raw = self.rfile.read(length) if length else b"{}"
         try:
@@ -356,9 +403,35 @@ class ReviewUIHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._json(400, {"error": "body must be JSON"})
             return
-        note = payload.get("note") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            self._json(400, {"error": "body must be a JSON object"})
+            return
+        note = payload.get("note")
         if not self.queue_path.is_file():
             self._json(404, {"error": f"no queue database at {self.queue_path}"})
+            return
+
+        if parts == ["api", "source", "reject"]:
+            source = str(payload.get("source") or "")
+            try:
+                with ReviewQueue(self.queue_path) as queue:
+                    rejected = queue.reject_source(source, note=note or "")
+            except QueueError as exc:
+                self._json(400, {"error": str(exc)})
+                return
+            self._json(200, {
+                "ok": True,
+                "rejected": len(rejected),
+                "ids": [item.id for item in rejected],
+            })
+            return
+
+        if len(parts) != 4 or parts[0] != "api" or parts[1] != "item":
+            self._json(404, {"error": "not found"})
+            return
+        action_id, verb = parts[2], parts[3]
+        if verb not in {"done", "approve", "reject", "retry"}:
+            self._json(404, {"error": "not found"})
             return
         try:
             with ReviewQueue(self.queue_path) as queue:

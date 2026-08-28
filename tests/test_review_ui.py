@@ -90,6 +90,7 @@ def test_page_is_served(server) -> None:
     assert status == 200
     assert "Mark done" in body
     assert "Nothing here is executed" in body
+    assert "Reject this recording" in body
 
 
 def test_outstanding_list_includes_pending(server) -> None:
@@ -144,6 +145,51 @@ def test_approve_does_not_execute_and_stays_outstanding(server, db) -> None:
         assert stored.status is Status.APPROVED
         assert stored.executor is None
         assert [a.id for a in q.list_outstanding()] == [action_id]
+
+
+def test_reject_source_via_ui_drops_file_from_digest(server, db) -> None:
+    """One click after a garbled hour: every outstanding item from that file."""
+    garbled = "R2026-08-27-11-30-55.MP3"
+    with ReviewQueue(db) as q:
+        q.enqueue(record(
+            title="Separate two-page holes",
+            provenance_overrides={
+                "source_audio": garbled,
+                "transcript_excerpt": "Separate two-page holes and then one-page duty.",
+            },
+        ))
+        q.enqueue(record(
+            title="Line up one-to-one",
+            provenance_overrides={
+                "source_audio": garbled,
+                "transcript_excerpt": "We should go and line up one-to-one to reflect everything.",
+            },
+        ))
+
+    status, result = _request(
+        server, "POST", "/api/source/reject",
+        {"source": garbled, "note": "garbled restaurant audio, not a work conversation"},
+    )
+    assert status == 200
+    assert result["rejected"] == 2
+    with ReviewQueue(db) as q:
+        outstanding = q.list_outstanding()
+        assert all(
+            Path(a.provenance.source_audio).name != garbled for a in outstanding
+        )
+        assert outstanding  # the fixture's 25 Aug item remains
+        assert all(a.executor is None for a in q.list())
+
+
+def test_reject_source_via_ui_requires_a_note(server, db) -> None:
+    status, result = _request(
+        server, "POST", "/api/source/reject",
+        {"source": "R2026-08-25-13-23-54.MP3", "note": ""},
+    )
+    assert status == 400
+    assert "note" in result["error"].lower()
+    with ReviewQueue(db) as q:
+        assert q.list_outstanding()
 
 
 def test_there_is_no_execute_route(server, db) -> None:

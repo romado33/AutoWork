@@ -7,6 +7,7 @@ Usage:
     python tools/review.py --list --status approved
     python tools/review.py --approve <id> [--note "..."]
     python tools/review.py --reject  <id> --note "why"
+    python tools/review.py --reject-source R2026-08-27-11-30-55.MP3 --note "garbled"
     python tools/review.py --retry   <id>      # a FAILED action back to APPROVED
     python tools/review.py --show    <id>      # full detail for one action
 
@@ -185,6 +186,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--done", metavar="ID",
                         help="check the work off; no executor runs")
     parser.add_argument("--reject", metavar="ID")
+    parser.add_argument(
+        "--reject-source",
+        metavar="FILE",
+        help="reject every outstanding item from this recording",
+    )
     parser.add_argument("--retry", metavar="ID")
     parser.add_argument("--note")
     args = parser.parse_args(argv)
@@ -220,6 +226,21 @@ def main(argv: list[str] | None = None) -> int:
                     return 2
                 record = queue.reject(resolve(queue, args.reject), note=args.note)
                 print(f"rejected {record.id[:8]}: {record.title}")
+                return 0
+
+            if args.reject_source is not None:
+                if not args.note:
+                    print("--reject-source requires --note (it is the extractor's only "
+                          "feedback)", file=sys.stderr)
+                    return 2
+                rejected = queue.reject_source(args.reject_source, note=args.note)
+                print(
+                    f"rejected {len(rejected)} from "
+                    f"{Path(args.reject_source).name}"
+                )
+                for record in rejected:
+                    print(f"  x {record.id[:8]}  {record.title}")
+                print("Not executed. No executor ran.")
                 return 0
 
             if args.retry is not None:

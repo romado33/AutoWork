@@ -220,6 +220,64 @@ def test_mark_done_checks_off_same_recording_title_clone(queue: ReviewQueue) -> 
     assert queue.list_outstanding() == []
 
 
+def test_reject_source_clears_a_garbled_recording_not_another_day(queue: ReviewQueue) -> None:
+    """2026-08-27 11:30 queued three fake to-dos. Rejecting the file must drop them
+    all from the digest, and must not touch Andrew's Okta item from another recording."""
+    garbled = "R2026-08-27-11-30-55.MP3"
+    work = "R2026-08-26-09-04-45.MP3"
+    two_page = queue.enqueue(make_action(
+        title="Separate two-page holes",
+        provenance=make_provenance(
+            source_audio=garbled,
+            transcript_excerpt="Separate two-page holes and then one-page duty.",
+        ),
+    ))
+    switching = queue.enqueue(make_action(
+        title="Account for switching software",
+        provenance=make_provenance(
+            source_audio=garbled,
+            transcript_excerpt=(
+                "Yeah, we'll definitely have the right you have to account "
+                "for switching software."
+            ),
+        ),
+    ))
+    line_up = queue.enqueue(make_action(
+        title="Line up one-to-one",
+        status=Status.APPROVED,
+        provenance=make_provenance(
+            source_audio=garbled,
+            transcript_excerpt="We should go and line up one-to-one to reflect everything.",
+        ),
+    ))
+    okta = queue.enqueue(make_action(
+        title="Check Okta permissions with Andrew",
+        provenance=make_provenance(
+            source_audio=work,
+            transcript_excerpt="I'll check that it has the correct permissions anyway.",
+        ),
+    ))
+
+    rejected = queue.reject_source(
+        garbled, note="garbled restaurant audio, not a work conversation"
+    )
+    assert {a.id for a in rejected} == {two_page, switching, line_up}
+    for action_id in (two_page, switching, line_up):
+        stored = queue.get(action_id)
+        assert stored.status is Status.REJECTED
+        assert stored.executed_at is None
+        assert stored.executor is None
+    assert queue.get(okta).status is Status.PENDING
+    assert [a.id for a in queue.list_outstanding()] == [okta]
+
+
+def test_reject_source_requires_a_note(queue: ReviewQueue) -> None:
+    action_id = queue.enqueue(make_action())
+    with pytest.raises(QueueError, match="requires a note"):
+        queue.reject_source("V2026-08-24-09-16-28.MP3", note="  ")
+    assert queue.get(action_id).status is Status.PENDING
+
+
 def test_done_is_terminal(queue: ReviewQueue) -> None:
     action_id = queue.enqueue(make_action())
     queue.mark_done(action_id)

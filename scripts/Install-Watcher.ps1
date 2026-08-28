@@ -36,7 +36,7 @@
 param(
     [string]$Serial = "AA986EA1",
     [string]$ProjectDir = "",
-    [string]$Python = "C:\Python313\python.exe",
+    [string]$Python = "",
     [string]$TaskName = "AutoWork Recorder Watcher",
     [string]$DigestTaskName = "AutoWork Morning Queue",
     [switch]$Uninstall
@@ -58,6 +58,21 @@ if ($Uninstall) {
         }
     }
     return
+}
+
+# Prefer the project venv. A bare C:\Python313 has no openai/PyYAML; the 7:30
+# digest would then fail with an import error, not a mailer error.
+# Default is computed here, not in the param block: $PSScriptRoot is empty
+# under Windows PowerShell 5.1 -File at parameter-binding time.
+if (-not $Python) {
+    $venvPy = Join-Path $ProjectDir ".venv\Scripts\python.exe"
+    if (Test-Path $venvPy) {
+        $Python = $venvPy
+    } else {
+        $found = Get-Command python -ErrorAction SilentlyContinue
+        if ($found) { $Python = $found.Source }
+        else { throw "python.exe not found: pass -Python or run scripts\setup.bat" }
+    }
 }
 
 $watcher = Join-Path $PSScriptRoot "Watch-Recorder.ps1"
@@ -109,9 +124,15 @@ Register-ScheduledTask `
 
 $digestScript = Join-Path $ProjectDir "tools\send_queue_digest.py"
 if (-not (Test-Path $digestScript)) { throw "not found: $digestScript" }
+$logDir = Join-Path $ProjectDir "logs"
+$null = New-Item -ItemType Directory -Force -Path $logDir
+$digestLog = Join-Path $logDir "digest.log"
+# cmd /c with file redirection, not a PowerShell pipeline: Python logs to stderr,
+# and redirected native stderr becomes ErrorRecords that kill a script under
+# $ErrorActionPreference=Stop. Same pattern as Watch-Recorder.ps1.
 $digestAction = New-ScheduledTaskAction `
-    -Execute $Python `
-    -Argument "-u `"$digestScript`"" `
+    -Execute "cmd.exe" `
+    -Argument "/c `"$Python`" -u `"$digestScript`" >> `"$digestLog`" 2>&1" `
     -WorkingDirectory $ProjectDir
 $digestTrigger = New-ScheduledTaskTrigger `
     -Weekly `
@@ -134,7 +155,7 @@ Register-ScheduledTask `
 ""
 "To send the morning queue now:"
 "  Start-ScheduledTask -TaskName '$DigestTaskName'"
-"  or:  $Python -u `"$digestScript`""
+"  or:  cmd /c `"$Python`" -u `"$digestScript`" >> `"$ProjectDir\logs\digest.log`" 2>&1"
 ""
 "To check the watcher is alive:"
 "  Get-ScheduledTask -TaskName '$TaskName' | Get-ScheduledTaskInfo"

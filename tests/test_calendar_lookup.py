@@ -77,14 +77,37 @@ def test_invitees_render_as_calendar_not_spoken_names() -> None:
 def test_clarify_terms_render_in_text_and_markdown() -> None:
     summary = Summary(
         headline="h",
-        topics=[],
+        topics=[{"label": "Okta", "summary": "Access review."}],
         decisions=[],
         open_questions=[],
         clarify_terms=["Octo", "Cotera"],
     )
     text = summary.to_text()
     markdown = summary.to_markdown()
+    html = summary.to_html()
     assert "TERMS TO CLARIFY" in text
     assert "Octo" in text
     assert "## Terms to clarify" in markdown
     assert "- Cotera" in markdown
+    assert "Terms to clarify" in html
+
+
+def test_garbled_summary_omits_clarify_salad() -> None:
+    """2026-08-27 11:30 resend listed Nintendo/Starlink/God on an empty summary."""
+    summary = Summary(
+        headline="Recording was too garbled to summarise",
+        topics=[],
+        decisions=[],
+        open_questions=[],
+        note="diarizer reported 12 voices in one upload",
+        clarify_terms=["Nintendo", "Starlink", "God"],
+    )
+    text = summary.to_text()
+    markdown = summary.to_markdown()
+    html = summary.to_html()
+    assert "Nintendo" not in text
+    assert "Starlink" not in markdown
+    assert "God" not in html
+    assert "TERMS TO CLARIFY" not in text
+    assert "Terms to clarify" not in markdown
+    assert "Terms to clarify" not in html

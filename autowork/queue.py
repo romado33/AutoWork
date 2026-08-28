@@ -225,6 +225,33 @@ class ReviewQueue:
         )
         return action
 
+    def reject_source(self, source: str, note: str) -> list[ActionRecord]:
+        """Reject every outstanding item from one recording. Nothing is executed.
+
+        Measured need: 2026-08-27 11:30 queued three fluent-garbage to-dos from a
+        restaurant hour. Rejecting them one by one is how they stay on the digest.
+        Same-recording title clones cascade from reject(); items from another
+        recording (Andrew vs Joe Okta) are left alone.
+        """
+        if not note.strip():
+            raise QueueError(
+                "a rejection requires a note; it is the extractor's only feedback"
+            )
+        key = Path(source).name.lower()
+        if not key:
+            raise QueueError("a recording filename is required")
+        rejected: list[ActionRecord] = []
+        for action in list(self.list_outstanding()):
+            if source_key(action) != key:
+                continue
+            current = self.get(action.id)
+            if Status.REJECTED not in ALLOWED_TRANSITIONS[current.status]:
+                continue
+            rejected.append(
+                self.reject(current.id, note=note)
+            )
+        return rejected
+
     def _cascade_similar(self, action: ActionRecord, new_status: Status, **updates: str | None) -> None:
         src = source_key(action)
         for other in self.list_outstanding():

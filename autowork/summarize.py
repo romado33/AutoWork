@@ -434,7 +434,7 @@ class Summary:
             if not today:
                 lines += ["_Not executed. Review with `scripts\\review-ui.bat` (or `scripts\\review.bat`)._", ""]
 
-        if self.clarify_terms:
+        if self.clarify_terms and self._has_discussion():
             lines += [
                 "## Terms to clarify",
                 "",
@@ -537,7 +537,7 @@ class Summary:
                     "(or <code>scripts\\review.bat</code>).</p>"
                 )
 
-        if self.clarify_terms:
+        if self.clarify_terms and self._has_discussion():
             parts.append(
                 "<h3>Terms to clarify</h3>"
                 "<p style='color:#777;font-size:12px'>Glossary does not know these yet. "
@@ -574,6 +574,14 @@ class Summary:
         if m.source_files:
             lines.append(f"Recording     {', '.join(m.source_files)}")
         return lines
+
+    def _has_discussion(self) -> bool:
+        """Salad from an unintelligible transcript is not a glossary flywheel.
+
+        The 2026-08-27 11:30 resend listed Nintendo, Starlink and God on an
+        empty summary. Those words were Whisper loops, not names to promote.
+        """
+        return bool(self.topics or self.decisions or self.open_questions)
 
     def to_text(self, actions: list | None = None) -> str:
         """Plain-text mail body. Must be readable without markdown rendering.
@@ -648,7 +656,7 @@ class Summary:
                     "",
                 ]
 
-        if self.clarify_terms:
+        if self.clarify_terms and self._has_discussion():
             lines += [
                 "TERMS TO CLARIFY",
                 "  Skim and promote real names into config/glossary.yml:",

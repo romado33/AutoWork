@@ -193,6 +193,65 @@ def test_missing_queue_database_is_a_clear_error(tmp_path, capsys) -> None:
     assert "no queue database" in capsys.readouterr().err
 
 
+def test_reject_source_via_cli_does_not_execute(tmp_path, capsys) -> None:
+    """Operator move after 11:30: one command, whole recording, no executor."""
+    db = tmp_path / "q.sqlite3"
+    garbled = "R2026-08-27-11-30-55.MP3"
+    with ReviewQueue(db) as q:
+        first = q.enqueue(record(
+            title="Separate two-page holes",
+            provenance_overrides={
+                "source_audio": garbled,
+                "transcript_excerpt": "Separate two-page holes and then one-page duty.",
+            },
+        ))
+        second = q.enqueue(record(
+            title="Account for switching software",
+            provenance_overrides={
+                "source_audio": garbled,
+                "transcript_excerpt": (
+                    "Yeah, we'll definitely have the right you have to "
+                    "account for switching software."
+                ),
+            },
+        ))
+        other = q.enqueue(record(
+            title="Check Okta with Andrew",
+            provenance_overrides={
+                "source_audio": "R2026-08-26-09-04-45.MP3",
+                "transcript_excerpt": "I'll check that it has the correct permissions anyway.",
+            },
+        ))
+
+    assert main([
+        "--queue", str(db),
+        "--reject-source", garbled,
+        "--note", "garbled restaurant audio, not a work conversation",
+    ]) == 0
+    out = capsys.readouterr().out
+    assert "rejected 2" in out
+    assert "Not executed" in out or "no executor" in out.lower()
+
+    with ReviewQueue(db) as q:
+        assert q.get(first).status is Status.REJECTED
+        assert q.get(second).status is Status.REJECTED
+        assert q.get(other).status is Status.PENDING
+        assert q.get(first).executor is None
+
+
+def test_reject_source_without_a_note_is_refused(tmp_path) -> None:
+    db = tmp_path / "q.sqlite3"
+    with ReviewQueue(db) as q:
+        q.enqueue(record())
+
+    assert main([
+        "--queue", str(db),
+        "--reject-source", "R2026-08-25-13-23-54.MP3",
+    ]) == 2
+    with ReviewQueue(db) as q:
+        assert q.list_outstanding()
+
+
 def test_illegal_transition_reports_and_exits_nonzero(tmp_path, capsys) -> None:
     """Expected failure: re-rejecting a terminal action."""
     db = tmp_path / "q.sqlite3"
