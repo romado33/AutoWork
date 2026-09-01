@@ -246,3 +246,76 @@ def test_a_forced_recording_does_not_return_on_a_later_normal_run(
     assert len(run.summarised) == 2
     assert "Okta access review" in run.summarised[1]
     assert "pizza" not in run.summarised[1]
+
+
+def test_a_second_run_of_the_same_files_does_not_resend(run, monkeypatch) -> None:
+    """--files is how an operator recovers a failed email. It must not also
+    duplicate a successful one. --resend is the explicit override."""
+    monkeypatch.setattr(
+        run_pipeline,
+        "summarise",
+        lambda *a, **k: Summary(
+            headline="Okta access review",
+            topics=[{"label": "Okta", "summary": "Move the review to Thursday."}],
+            decisions=[],
+            open_questions=[],
+        ),
+    )
+    audio = make_recording(run, "R2026-08-26-09-04-45", WORK)
+    assert run("--files", str(audio), "--no-extract", "--to", "rob@example.com") == 0
+    assert len(run.sent) == 1
+    assert run("--files", str(audio), "--no-extract", "--to", "rob@example.com") == 0
+    assert len(run.sent) == 1
+    assert run(
+        "--files", str(audio), "--no-extract", "--resend", "--to", "rob@example.com"
+    ) == 0
+    assert len(run.sent) == 2
+
+
+def test_extract_of_one_file_overlaps_transcribe_of_the_next(run, monkeypatch) -> None:
+    """Extraction is ~7s of CPU-bound API time after a multi-minute transcribe.
+    Starting it while the next file uploads costs nothing and saves those 7s
+    on every extra recording in a USB batch.
+    """
+    import time
+    from autowork.transcribe_cloud import CloudSegment
+
+    events: list[tuple[str, str, float]] = []
+
+    def slow_transcribe(path, **_k):
+        events.append(("t-start", path.name, time.monotonic()))
+        time.sleep(0.12)
+        events.append(("t-end", path.name, time.monotonic()))
+        return [
+            CloudSegment(
+                source_audio=str(path),
+                start_sec=0,
+                end_sec=60,
+                verdict="clean",
+                speech_rumble_db=6.6,
+                text=WORK,
+            )
+        ]
+
+    def slow_extract(segments, path, queue_path):
+        events.append(("e-start", path.name, time.monotonic()))
+        time.sleep(0.12)
+        events.append(("e-end", path.name, time.monotonic()))
+        return []
+
+    monkeypatch.setattr(run_pipeline, "transcribe_file_cloud", slow_transcribe)
+    monkeypatch.setattr(run_pipeline, "extract_into_queue", slow_extract)
+
+    first = run.audio / "R2026-08-26-09-04-45.MP3"
+    second = run.audio / "R2026-08-26-11-00-00.MP3"
+    first.write_bytes(b"")
+    second.write_bytes(b"")
+    assert run("--files", str(first), str(second), "--no-email") == 0
+
+    e1_start = next(t for n, p, t in events if n == "e-start" and "09-04" in p)
+    t2_start = next(t for n, p, t in events if n == "t-start" and "11-00" in p)
+    e1_end = next(t for n, p, t in events if n == "e-end" and "09-04" in p)
+    t2_end = next(t for n, p, t in events if n == "t-end" and "11-00" in p)
+    assert e1_start < t2_end and t2_start < e1_end, (
+        "extract of the first file ran only after the second transcription finished"
+    )

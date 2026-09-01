@@ -224,6 +224,8 @@ def test_markdown_rendering_carries_every_section() -> None:
     markdown = summary().to_markdown()
     for expected in ("## Discussed", "## Decided", "## Left open"):
         assert expected in markdown
+    assert "### Mapping accuracy" in markdown
+    assert "~28% exact, ~90% per customer" in markdown
 
 
 def test_metadata_header_is_derived_not_generated() -> None:
@@ -474,6 +476,14 @@ def test_concurrent_uploads_preserve_chronological_order(tmp_path, monkeypatch) 
 
     monkeypatch.setattr(tc, "encode_slice", fake_encode)
 
+    measured = {"n": 0}
+
+    def counting_measure(*a, **k):
+        measured["n"] += 1
+        return []
+
+    monkeypatch.setattr(tc, "measure", counting_measure)
+
     stub = _StubClient()
     result = tc.transcribe_file_cloud(audio, client=stub)
 
@@ -482,6 +492,68 @@ def test_concurrent_uploads_preserve_chronological_order(tmp_path, monkeypatch) 
     starts = [seg.start_sec for seg in result]
     assert starts == sorted(starts), "transcript order must be chronological"
     assert stub.peak > 1, "uploads ran sequentially; the pool is not overlapping"
+    assert measured["n"] == 1, "measure() was run twice on the same file"
+
+
+def test_upload_starts_before_the_last_clip_is_encoded(tmp_path, monkeypatch) -> None:
+    """Encode-then-upload left the network idle while ffmpeg finished every slice.
+
+    Diarization is the long wait; overlapping the first upload with the later
+    encodes saves only seconds, but those seconds are free and the previous
+    shape made a 5-clip file wait for all 5 encodes before the first byte left.
+    """
+    import threading
+    import time
+    import subprocess
+    import autowork.transcribe_cloud as tc
+    from autowork.gate import Segment, Verdict
+
+    audio = tmp_path / "R2026-08-25-09-00-00.MP3"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+         "anullsrc=r=16000:cl=mono", "-t", "2", str(audio)],
+        check=True, capture_output=True,
+    )
+    fake_segments = [
+        Segment(start_sec=0, end_sec=1500, verdict=Verdict.CLEAN,
+                mean_speech_db=-27, mean_delta_db=6.6, window_count=100),
+        Segment(start_sec=1600, end_sec=2400, verdict=Verdict.CLEAN,
+                mean_speech_db=-27, mean_delta_db=6.6, window_count=53),
+    ]
+    monkeypatch.setattr(tc, "measure", lambda *a, **k: [])
+    monkeypatch.setattr(tc, "segments", lambda *a, **k: fake_segments)
+
+    events: list[tuple[str, float]] = []
+    lock = threading.Lock()
+
+    def slow_encode(source, start, end, dest):
+        with lock:
+            events.append(("encode-start", time.monotonic()))
+        time.sleep(0.04)
+        dest.write_bytes(b"mp3")
+        with lock:
+            events.append(("encode-end", time.monotonic()))
+        return 3
+
+    monkeypatch.setattr(tc, "encode_slice", slow_encode)
+
+    class SlowClient(_StubClient):
+        pass
+
+    stub = SlowClient()
+    original_create = stub.audio.transcriptions.create
+
+    def timed_create(file, **kwargs):
+        with lock:
+            events.append(("upload-start", time.monotonic()))
+        return original_create(file, **kwargs)
+
+    stub.audio.transcriptions.create = timed_create
+    result = tc.transcribe_file_cloud(audio, client=stub)
+    assert len(result) == 5
+    first_upload = min(t for name, t in events if name == "upload-start")
+    last_encode = max(t for name, t in events if name == "encode-end")
+    assert first_upload < last_encode, "every clip was encoded before the first upload"
 
 
 def test_transient_failure_is_retried_then_succeeds(tmp_path, monkeypatch) -> None:

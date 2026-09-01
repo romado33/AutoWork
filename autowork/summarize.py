@@ -94,21 +94,36 @@ SUMMARY_SCHEMA: dict = {
 # {date} is substituted at run time with the recording date, when known.
 SUMMARY_PROMPT = """\
 You are an experienced chief of staff summarising a transcript of a spoken work
-conversation for the person who recorded it. A chief of staff filters for what
-their principal must remember and act on: outcomes, numbers, commitments, dates,
-and open threads -- not the play-by-play.
+conversation for the person who recorded it. Capture everything they will need
+later: distinct projects and workstreams, systems, customers, numbers, options
+considered, what was settled, and what was left open. Compress filler and
+repetition, not substance.
 
 Recording date: {date}
 
-Write for someone who was present and wants to remember, not for an outsider who
-needs explaining to. Be specific: name the systems, customers, numbers and people
-actually mentioned. "Discussed the mapping accuracy" is useless; "Entity mapping:
-~28% exact match globally, ~90% scoped to one customer's history" is what they
-need.
+Write for someone who was present and wants a complete reminder, not a
+headline-only digest. Be specific: name the systems, customers, numbers and
+people actually mentioned. "Discussed the mapping accuracy" is useless;
+"Entity mapping: ~28% exact match globally, ~90% scoped to one customer's
+history" is what they need.
 
-Each topic is at most two sentences. Keep the number that matters and drop the
-narrative around it. At most six topics; smaller threads get merged into a
-related topic or dropped.
+One topic per distinct project, workstream, or decision-thread. When speakers
+explicitly introduce distinct projects ("I have two new projects", "the other
+project", "that's all the questions I have on that one"), those are separate
+topics. Do not merge two named projects into one bullet, and do not fold a new
+project into leftover discussion of earlier work. A follow-up call often starts
+with leftover work from last week, then moves to new projects: leftover work
+and each new project are separate topics. Do not pour a new project's details
+into the leftover-work topic because they were discussed in the same sitting.
+A finished piece of work from a previous week is its own topic, or omitted,
+never mixed into a new project's summary. The headline should name each
+distinct project if there are two or three.
+
+Give each topic enough room to keep the useful details: tools named, metrics
+cited, options considered and why they were kept or dropped, constraints
+(access, licences), and any next step that was spoken. A short paragraph is
+better than dropping a fact. Do not merge unrelated threads to stay under a
+topic count. Skip only greetings, weather, and garbled stretches.
 
 Rules:
 - Only state what the transcript directly supports. Do not infer or fill gaps;
@@ -128,6 +143,7 @@ Rules:
 - When a date, deadline or timeframe was spoken ("by Friday", "next week"),
   keep it as spoken, inside the topic or decision it belongs to.
 - "open_questions" are questions the conversation left genuinely unresolved.
+  Keep each distinct open question; do not collapse two into one.
 - Do not produce a list of people mentioned. Names belong inline where they
   came up. Never add titles or turn a company name like "Carter Lumber" into a
   person. Copy names from the transcript, except: when the conversation is
@@ -157,7 +173,10 @@ You are merging several partial summaries of ONE conversation into a single summ
 
 The parts are sequential slices of the same discussion, so the same topic will often \
 appear in more than one part. Merge those into one entry rather than repeating them. \
-Keep the specifics -- numbers, names, systems. Drop nothing substantive.
+Distinct projects and workstreams stay separate: leftover work from last week \
+is not the same topic as a new project introduced later in the same call. Keep \
+the specifics -- numbers, names, systems, options considered, constraints. \
+Drop nothing substantive.
 
 Return JSON in the same shape.
 """
@@ -398,10 +417,10 @@ class Summary:
         if self.topics:
             lines += ["## Discussed", ""]
             for topic in self.topics:
-                lines.append(
-                    f"- **{topic.get('label', '?')}**: {topic.get('summary', '')}"
-                )
-            lines.append("")
+                lines.append(f"### {topic.get('label', '?')}")
+                lines.append("")
+                lines.append(topic.get("summary", ""))
+                lines.append("")
         if self.decisions:
             lines += ["## Decided", ""]
             for entry in self.decisions:
@@ -491,13 +510,12 @@ class Summary:
             )
 
         if self.topics:
-            parts.append("<h3>Discussed</h3><ul>")
+            parts.append("<h3>Discussed</h3>")
             for topic in self.topics:
                 parts.append(
-                    f"<li><b>{esc(topic.get('label', '?'))}</b>: "
-                    f"{esc(topic.get('summary', ''))}</li>"
+                    f"<h4 style='margin:16px 0 6px'>{esc(topic.get('label', '?'))}</h4>"
+                    f"<p style='margin:0 0 8px'>{esc(topic.get('summary', ''))}</p>"
                 )
-            parts.append("</ul>")
         if self.decisions:
             parts.append("<h3>Decided</h3><ul>")
             for entry in self.decisions:
@@ -617,8 +635,9 @@ class Summary:
         if self.topics:
             lines += ["=" * 68, "DISCUSSED", "=" * 68, ""]
             for topic in self.topics:
-                lines.append(f"  * {topic.get('label', '?')}: {topic.get('summary', '')}")
-            lines.append("")
+                lines.append(topic.get("label", "?"))
+                lines.append(f"  {topic.get('summary', '')}")
+                lines.append("")
         if self.decisions:
             lines.append("DECIDED")
             for entry in self.decisions:

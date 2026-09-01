@@ -248,7 +248,8 @@ def transcribe_file_cloud(
 
     gate = gate or GateConfig()
     try:
-        keep = segments(measure(source, gate), gate)
+        windows = measure(source, gate)
+        keep = segments(windows, gate)
     except GateError as exc:
         raise CloudTranscriptionError(f"gating failed: {exc}") from exc
 
@@ -260,89 +261,92 @@ def transcribe_file_cloud(
     logger.info(
         "%s: uploading %.0f min of %.0f min (%d segment(s))",
         source.name, total_audio / 60,
-        len(measure(source, gate)) * gate.window_sec / 60, len(keep),
+        len(windows) * gate.window_sec / 60, len(keep),
     )
 
-    # Encode every slice first (ffmpeg, seconds), then transcribe them CONCURRENTLY.
-    # Diarization runs at roughly 2x realtime per request, so sequential uploads make a
-    # 23-minute conversation an 11-minute wait in three silent steps; four workers cut
-    # that to roughly the longest single chunk. Four, not more: enough to matter, small
-    # enough not to trip per-minute rate limits, and each worker holds one clip's
-    # transcription in memory at most.
-    jobs: list[tuple[int, float, float, Segment, Path, int]] = []
+    # Encode and upload OVERLAP. Diarization is ~2x realtime per request, so
+    # sequential uploads make a 23-minute conversation an 11-minute wait; four
+    # workers cut that to roughly the longest single chunk. Encoding every slice
+    # first left the network idle for those few seconds of ffmpeg; submitting each
+    # clip as soon as it exists overlaps the rest of the encodes with the first
+    # uploads. Four, not more: enough to matter, small enough not to trip
+    # per-minute rate limits, and each worker holds one clip's transcription in
+    # memory at most.
+    from concurrent.futures import Future, ThreadPoolExecutor
+
+    def run_job(job) -> CloudSegment | None:
+        _order, start, end, segment, clip, size = job
+        started = time.monotonic()
+        try:
+            text, speakers = _transcribe_with_retry(client, clip, model)
+        except CloudTranscriptionError as exc:
+            # One bad segment must not cost the whole recording. Report it and
+            # keep going; a partial transcript beats none, and the log shows
+            # which window is missing.
+            logger.warning("skipping %.0fs-%.0fs: %s", start, end, str(exc)[:200])
+            return None
+        elapsed = time.monotonic() - started
+
+        if not text.strip():
+            logger.info(
+                "%.0fs-%.0fs passed the gate (%+.1f dB) but held no speech; "
+                "skipping", start, end, segment.mean_delta_db,
+            )
+            return None
+
+        text, unintelligible = assess(text, speakers)
+
+        applied: list[str] = []
+        if glossary:
+            # Glossary.correct compiles fresh patterns per call and mutates
+            # nothing shared, so calling it from worker threads is safe.
+            text, applied = glossary.correct(text)
+
+        logger.info(
+            "transcribed %.0fs-%.0fs: %d chars from %.1f MB in %.1fs",
+            start, end, len(text), size / 1e6, elapsed,
+        )
+        return CloudSegment(
+            source_audio=str(source),
+            start_sec=start,
+            end_sec=end,
+            verdict=segment.verdict.value,
+            speech_rumble_db=segment.mean_delta_db,
+            text=text,
+            speakers=speakers,
+            glossary_applied=applied,
+            uploaded_bytes=size,
+            elapsed_sec=elapsed,
+            unintelligible_because=unintelligible or "",
+        )
+
+    futures: list[Future] = []
     with tempfile.TemporaryDirectory(prefix="autowork-cloud-") as tmp:
         workdir = Path(tmp)
-        order = 0
-        for index, segment in enumerate(keep):
-            if segment.duration_sec < MIN_SEGMENT_SEC:
-                logger.info(
-                    "skipping %.0fs-%.0fs: %.0fs is below the %.0fs minimum",
-                    segment.start_sec, segment.end_sec,
-                    segment.duration_sec, MIN_SEGMENT_SEC,
-                )
-                continue
-            for part, (start, end) in enumerate(split_for_upload(segment)):
-                clip = workdir / f"seg{index:03d}_{part:02d}.mp3"
-                size = encode_slice(source, start, end, clip)
-                if size > MAX_UPLOAD_BYTES:
-                    raise CloudTranscriptionError(
-                        f"{clip.name} is {size / 1e6:.1f} MB, above the "
-                        f"{MAX_UPLOAD_BYTES / 1e6:.0f} MB upload budget"
+        # Pool lives inside the tempdir so clips still exist when workers read them.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            order = 0
+            for index, segment in enumerate(keep):
+                if segment.duration_sec < MIN_SEGMENT_SEC:
+                    logger.info(
+                        "skipping %.0fs-%.0fs: %.0fs is below the %.0fs minimum",
+                        segment.start_sec, segment.end_sec,
+                        segment.duration_sec, MIN_SEGMENT_SEC,
                     )
-                jobs.append((order, start, end, segment, clip, size))
-                order += 1
+                    continue
+                for part, (start, end) in enumerate(split_for_upload(segment)):
+                    clip = workdir / f"seg{index:03d}_{part:02d}.mp3"
+                    size = encode_slice(source, start, end, clip)
+                    if size > MAX_UPLOAD_BYTES:
+                        raise CloudTranscriptionError(
+                            f"{clip.name} is {size / 1e6:.1f} MB, above the "
+                            f"{MAX_UPLOAD_BYTES / 1e6:.0f} MB upload budget"
+                        )
+                    job = (order, start, end, segment, clip, size)
+                    futures.append(pool.submit(run_job, job))
+                    order += 1
+            # Submission order, not completion order: the transcript stays
+            # chronological even though the network finishes chunks out of order.
+            outcomes = [fut.result() for fut in futures]
 
-        def run_job(job) -> CloudSegment | None:
-            order_, start, end, segment, clip, size = job
-            started = time.monotonic()
-            try:
-                text, speakers = _transcribe_with_retry(client, clip, model)
-            except CloudTranscriptionError as exc:
-                # One bad segment must not cost the whole recording. Report it and
-                # keep going; a partial transcript beats none, and the log shows
-                # which window is missing.
-                logger.warning("skipping %.0fs-%.0fs: %s", start, end, str(exc)[:200])
-                return None
-            elapsed = time.monotonic() - started
-
-            if not text.strip():
-                logger.info(
-                    "%.0fs-%.0fs passed the gate (%+.1f dB) but held no speech; "
-                    "skipping", start, end, segment.mean_delta_db,
-                )
-                return None
-
-            text, unintelligible = assess(text, speakers)
-
-            applied: list[str] = []
-            if glossary:
-                # Glossary.correct compiles fresh patterns per call and mutates
-                # nothing shared, so calling it from worker threads is safe.
-                text, applied = glossary.correct(text)
-
-            logger.info(
-                "transcribed %.0fs-%.0fs: %d chars from %.1f MB in %.1fs",
-                start, end, len(text), size / 1e6, elapsed,
-            )
-            return CloudSegment(
-                source_audio=str(source),
-                start_sec=start,
-                end_sec=end,
-                verdict=segment.verdict.value,
-                speech_rumble_db=segment.mean_delta_db,
-                text=text,
-                speakers=speakers,
-                glossary_applied=applied,
-                uploaded_bytes=size,
-                elapsed_sec=elapsed,
-                unintelligible_because=unintelligible or "",
-            )
-
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(max_workers=min(4, max(1, len(jobs)))) as pool:
-            outcomes = list(pool.map(run_job, jobs))
-
-    # pool.map preserves submission order, so the transcript stays chronological even
-    # though the requests completed in whatever order the network allowed.
     return [outcome for outcome in outcomes if outcome is not None]

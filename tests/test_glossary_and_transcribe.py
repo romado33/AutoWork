@@ -179,6 +179,58 @@ def test_no_known_variants_leaves_text_untouched(tmp_path) -> None:
     assert applied == []
 
 
+def test_promote_appends_a_correct_tier_term_without_touching_comments(tmp_path) -> None:
+    """The review UI flywheel must not rewrite glossary.yml and wipe the measured WHYs."""
+    path = write_glossary(
+        tmp_path,
+        """
+        # Comments explain measured WHY, not what.
+        terms:
+          - term: Claude
+            tier: prompt
+            variants: [Clark]
+        """,
+    )
+    original = path.read_text(encoding="utf-8")
+    Glossary.promote(path, "Cotera", variant="Kotera")
+    rewritten = path.read_text(encoding="utf-8")
+    assert "# Comments explain measured WHY, not what." in rewritten
+    assert original in rewritten
+    loaded = Glossary.load(path)
+    names = [t.term for t in loaded.terms]
+    assert "Cotera" in names
+    cotera = next(t for t in loaded.terms if t.term == "Cotera")
+    assert cotera.tier == "correct"
+    assert "Kotera" in cotera.variants
+    assert loaded.correct("Talk to Kotera about the deal.")[0].startswith("Talk to Cotera")
+
+
+def test_promote_adds_a_variant_to_an_existing_term(tmp_path) -> None:
+    path = write_glossary(tmp_path, BASIC)
+    Glossary.promote(path, "Claude", variant="Clawed")
+    g = Glossary.load(path)
+    claude = next(t for t in g.terms if t.term == "Claude")
+    assert "Clawed" in claude.variants
+    assert "Clark" in claude.variants
+    fixed, applied = g.correct("Clawed wrote the prompt")
+    assert "Claude" in fixed
+    assert "Claude" in applied
+
+
+def test_promote_is_idempotent(tmp_path) -> None:
+    path = write_glossary(tmp_path, BASIC)
+    first = Glossary.promote(path, "Cotera", variant="Kotera")
+    second = Glossary.promote(path, "Cotera", variant="Kotera")
+    assert first.term == second.term == "Cotera"
+    assert sum(1 for t in Glossary.load(path).terms if t.term == "Cotera") == 1
+
+
+def test_promote_refuses_a_variant_that_is_another_canonical_term(tmp_path) -> None:
+    path = write_glossary(tmp_path, BASIC)
+    with pytest.raises(GlossaryError, match="canonical"):
+        Glossary.promote(path, "Claude", variant="forms")
+
+
 def test_summary_hint_carries_context_and_variants(tmp_path) -> None:
     """The summariser already reads the whole call; this is how it learns Okta
     from an authorization discussion without a second billed pass."""
@@ -242,6 +294,28 @@ def test_operator_summary_prompt_has_glossary_slot() -> None:
     text = load_summary_prompt()
     assert "{glossary}" in text
     assert "near-miss" in text
+
+
+def test_operator_summary_prompt_keeps_named_projects_separate() -> None:
+    """2026-09-01 Rob/Dan Weekly: Dan said 'I do have two new projects' and closed
+    the first with 'that's all the questions I have on that one'. The mailed
+    summary mixed last week's evaluation into the usage-metrics project, and
+    two-sentence / six-topic caps were dropping useful detail.
+    """
+    from autowork.summarize import MERGE_PROMPT, load_summary_prompt
+
+    text = load_summary_prompt()
+    assert "two new projects" in text
+    assert "Do not merge two named projects" in text
+    assert "Do not pour a new project's details" in text
+    assert "leftover-work topic" in text
+    assert "Compress filler and repetition, not substance" in text
+    assert "short paragraph" in text
+    assert "dropping a fact" in text
+    assert "at most six topics" not in text.lower()
+    assert "at most two sentences" not in text.lower()
+    assert "Distinct projects and workstreams stay separate" in MERGE_PROMPT
+    assert "Drop nothing substantive" in MERGE_PROMPT
 
 
 def test_project_glossary_loads_okta_context() -> None:

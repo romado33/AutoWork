@@ -210,6 +210,19 @@ terms:
   - term: submission
     tier: correct
     variants: []
+  # 2026-09-01 Rob/Dan Weekly: the email listed New/Relic as names to clarify.
+  - term: New Relic
+    tier: correct
+    variants: []
+    about: [APM, observability, usage metrics]
+  - term: Sentry
+    tier: correct
+    variants: []
+    about: [error tracking, mobile instrumentation]
+  - term: UserPilot
+    tier: correct
+    variants: [User Pilot, user product]
+    about: [in-app guidance, web portal clicks]
 
 # Terms the correction pass could not resolve get written here for you to name.
 # This is the "ask me to clarify" loop: review them, promote the real ones into

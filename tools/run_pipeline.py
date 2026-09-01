@@ -7,6 +7,7 @@ Usage:
     python tools/run_pipeline.py --no-email            # everything but the send
     python tools/run_pipeline.py --no-diarize          # faster, no speaker labels
     python tools/run_pipeline.py --dry-run             # gate only, upload nothing
+    python tools/run_pipeline.py --resend              # email even if already sent
 
 Configuration lives in .env, never in source or on the command line:
 
@@ -80,6 +81,7 @@ from autowork.day import (  # noqa: E402
 from autowork.conversations import Conversation, group_conversations  # noqa: E402
 from autowork.calendar_lookup import match_recording  # noqa: E402
 from autowork.digest import apply_glossary_all  # noqa: E402
+from autowork.sent import already_sent, conversation_key, mark_sent  # noqa: E402
 
 DEFAULT_SERIAL = "AA986EA1"
 
@@ -298,6 +300,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="one-off operator override: summarise even if personal or garbled",
     )
+    parser.add_argument(
+        "--resend",
+        action="store_true",
+        help="email even if this conversation was sent already",
+    )
     parser.add_argument("--dry-run", action="store_true", help="gate only, no uploads")
     parser.add_argument("--to", default=None, help="summary recipient")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -371,6 +378,18 @@ def main(argv: list[str] | None = None) -> int:
     def touch(date_key: str | None) -> None:
         if date_key:
             dates_touched.add(date_key)
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    # One worker: SQLite does not enjoy two extractors writing at once. The overlap
+    # we want is extract(file N) with transcribe(file N+1), which this gives us.
+    extract_pool = ThreadPoolExecutor(max_workers=1)
+    extract_futures: list = []
+
+    def schedule_extract(segments: list, path: Path) -> None:
+        extract_futures.append(
+            extract_pool.submit(extract_into_queue, segments, path, args.queue)
+        )
 
     # --- 2. per recording -----------------------------------------------------
     def process_recording(path: Path) -> None:
@@ -490,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
             # real items existed (once after a crash, once after a queue rebuild).
             # Only transcription is expensive enough to deserve a cache.
             if not args.no_extract and not args.force_keep:
-                extract_into_queue(cached_segments, path, args.queue)
+                schedule_extract(cached_segments, path)
             elif args.force_keep:
                 print("  --force-keep: not extracting action items")
             return
@@ -568,17 +587,27 @@ def main(argv: list[str] | None = None) -> int:
 
         # --- 3. extract into the review queue --------------------------------
         if not args.no_extract and not args.force_keep:
-            extract_into_queue(kept_segs, path, args.queue)
+            schedule_extract(kept_segs, path)
         elif args.force_keep:
             print("  --force-keep: not extracting action items")
 
-    for path in sorted(paths):
+    try:
+        for path in sorted(paths):
+            try:
+                process_recording(path)
+            except (OSError, QueueError, DayError, GlossaryError) as exc:
+                # A locked transcript, a full disk or a busy SQLite file is one bad
+                # recording, not a reason to abandon the rest of the day's audio.
+                print(f"{path.name}: skipped after an unexpected failure: {exc}",
+                      file=sys.stderr)
+                failures += 1
+    finally:
+        extract_pool.shutdown(wait=True)
+    for fut in extract_futures:
         try:
-            process_recording(path)
-        except (OSError, QueueError, DayError, GlossaryError) as exc:
-            # A locked transcript, a full disk or a busy SQLite file is one bad
-            # recording, not a reason to abandon the rest of the day's audio.
-            print(f"{path.name}: skipped after an unexpected failure: {exc}",
+            fut.result()
+        except (OSError, QueueError, DayError) as exc:
+            print(f"extraction skipped after an unexpected failure: {exc}",
                   file=sys.stderr)
             failures += 1
 
@@ -709,6 +738,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             subject = f"Call {stamp} {time_bit.replace('-', ':')}: {summary.headline[:50]}"
+        sent_dir = transcript_dir.parent / "summaries"
+        key = conversation_key(convo.source_files)
+        if not args.resend and already_sent(sent_dir, key):
+            print("  already emailed this conversation; pass --resend to send again")
+            continue
         body = summary.to_text(actions=convo_actions)
         try:
             print("  " + send(recipient, subject, body,
@@ -716,6 +750,8 @@ def main(argv: list[str] | None = None) -> int:
         except MailError as exc:
             print(f"  email failed: {exc}", file=sys.stderr)
             failures += 1
+            continue
+        mark_sent(sent_dir, key, subject)
 
     if summarised == 0 and failures == 0:
         return 0

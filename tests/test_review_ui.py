@@ -56,8 +56,10 @@ def db(tmp_path):
 
 
 @pytest.fixture()
-def server(db):
-    httpd = make_server(db, port=0)
+def server(db, tmp_path):
+    glossary = tmp_path / "glossary.yml"
+    glossary.write_text("terms:\n  - term: Claude\n    tier: prompt\n    variants: [Clark]\n", encoding="utf-8")
+    httpd = make_server(db, port=0, glossary_path=glossary)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     yield httpd
@@ -91,6 +93,29 @@ def test_page_is_served(server) -> None:
     assert "Mark done" in body
     assert "Nothing here is executed" in body
     assert "Reject this recording" in body
+    assert "Add a glossary name" in body
+
+
+def test_promote_via_ui_appends_a_correct_tier_term(server) -> None:
+    """Skimming Terms to clarify only compounds if adding the name is one click."""
+    status, result = _request(
+        server, "POST", "/api/glossary",
+        {"term": "Cotera", "variant": "Kotera"},
+    )
+    assert status == 200
+    assert result["term"] == "Cotera"
+    glossary = server.RequestHandlerClass.glossary_path
+    from autowork.glossary import Glossary
+    loaded = Glossary.load(glossary)
+    cotera = next(t for t in loaded.terms if t.term == "Cotera")
+    assert cotera.tier == "correct"
+    assert "Kotera" in cotera.variants
+
+
+def test_promote_via_ui_requires_a_term(server) -> None:
+    status, result = _request(server, "POST", "/api/glossary", {"term": "", "variant": "x"})
+    assert status == 400
+    assert "term" in result["error"].lower()
 
 
 def test_outstanding_list_includes_pending(server) -> None:

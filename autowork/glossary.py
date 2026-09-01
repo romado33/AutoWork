@@ -21,6 +21,7 @@ enforces this via Verdict.allows_glossary_prompt; nothing here should bypass it.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -277,6 +278,55 @@ class Glossary:
             return applied
         return []
 
+    @classmethod
+    def promote(
+        cls,
+        path: str | Path,
+        term: str,
+        variant: str = "",
+        about: list[str] | tuple[str, ...] | None = None,
+    ) -> Term:
+        """Add a name to the glossary file without rewriting the rest of it.
+
+        Comments in glossary.yml explain measured WHY. A round-trip dump would
+        wipe them. New terms are appended; a new variant of an existing term is
+        spliced into that entry's variants list. Always correct-tier: the prompt
+        budget is tight and a UI click must not evict Claude for a one-off name.
+        """
+        source = Path(path)
+        canonical = term.strip()
+        heard = variant.strip()
+        if not canonical:
+            raise GlossaryError("a term is required")
+        if heard.lower() == canonical.lower():
+            heard = ""
+
+        glossary = cls.load(source)
+        existing = next(
+            (t for t in glossary.terms if t.term.lower() == canonical.lower()), None
+        )
+        if heard:
+            other_canonical = {
+                t.term.lower() for t in glossary.terms if t is not existing
+            }
+            if heard.lower() in other_canonical:
+                raise GlossaryError(
+                    f"variant {heard!r} of {canonical!r} is itself a canonical "
+                    f"term; correcting it would corrupt correct transcripts"
+                )
+
+        if existing is not None:
+            if not heard:
+                return existing
+            if heard.lower() in {v.lower() for v in existing.variants}:
+                return existing
+            _splice_variant(source, existing.term, heard)
+            glossary = cls.load(source)
+            return next(t for t in glossary.terms if t.term.lower() == existing.term.lower())
+
+        _append_term(source, canonical, heard, tuple(about or ()))
+        return cls.load(source).terms[-1]
+
     def unknown_proper_nouns(self, text: str, min_occurrences: int = 1) -> list[str]:
         """Heuristic: capitalised words this glossary does not know, seen repeatedly.
 
@@ -313,3 +363,65 @@ class Glossary:
             (w for w, n in counts.items() if n >= min_occurrences),
             key=lambda w: (-counts[w], w),
         )
+
+
+def _yaml_string(value: str) -> str:
+    """A YAML scalar that will not be interpreted as a boolean or a nested structure."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _append_term(path: Path, term: str, variant: str, about: tuple[str, ...]) -> None:
+    variants = f"[{_yaml_string(variant)}]" if variant else "[]"
+    lines = [
+        f"  - term: {_yaml_string(term)}",
+        "    tier: correct",
+        f"    variants: {variants}",
+    ]
+    if about:
+        lines.append(
+            "    about: [" + ", ".join(_yaml_string(a) for a in about) + "]"
+        )
+    raw = path.read_text(encoding="utf-8")
+    path.write_text(raw.rstrip() + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _splice_variant(path: Path, term: str, variant: str) -> None:
+    """Insert one variant into an existing term's flow-style variants list."""
+    raw = path.read_text(encoding="utf-8")
+    term_re = re.compile(
+        rf"^(\s*)- term:\s*(?:{_re_quote(term)})\s*$",
+        re.M,
+    )
+    match = term_re.search(raw)
+    if match is None:
+        raise GlossaryError(f"cannot find term {term!r} in {path.name} to add a variant")
+    start = match.end()
+    next_term = re.search(r"^(\s*)- term:", raw[start:], re.M)
+    block_end = start + next_term.start() if next_term else len(raw)
+    block = raw[start:block_end]
+    var_re = re.compile(r"^(\s*)variants:\s*\[(.*)\]", re.M)
+    var_match = var_re.search(block)
+    if var_match is None:
+        # No variants line yet: insert one after the term line.
+        insert = f"\n{match.group(1)}  variants: [{_yaml_string(variant)}]"
+        path.write_text(raw[:start] + insert + raw[start:], encoding="utf-8")
+        return
+    inner = var_match.group(2).strip()
+    current = yaml.safe_load(f"[{inner}]") if inner else []
+    if not isinstance(current, list):
+        raise GlossaryError(f"variants of {term!r} is not a list")
+    if any(str(v).lower() == variant.lower() for v in current):
+        return
+    current.append(variant)
+    rendered = "[" + ", ".join(_yaml_string(str(v)) for v in current) + "]"
+    new_block = (
+        block[: var_match.start()]
+        + f"{var_match.group(1)}variants: {rendered}"
+        + block[var_match.end() :]
+    )
+    path.write_text(raw[:start] + new_block + raw[block_end:], encoding="utf-8")
+
+
+def _re_quote(term: str) -> str:
+    escaped = re.escape(term)
+    return rf'(?:"{escaped}"|\'{escaped}\'|{escaped})'

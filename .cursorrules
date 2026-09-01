@@ -3,7 +3,7 @@
 Pocket voice recorder -> ingest by volume serial -> audio quality gate -> cloud
 transcription with diarization -> relevance gate -> summary email + grounded action
 items in a human review queue. Python 3.11+, three deps (openai, PyYAML, pytest),
-ffmpeg required. Run tests: `python -m pytest tests -q` (260 passing; keep it that way).
+ffmpeg required. Run tests: `python -m pytest tests -q` (275 passing; keep it that way).
 
 ## Safety invariants — never weaken these
 
@@ -75,9 +75,14 @@ ffmpeg required. Run tests: `python -m pytest tests -q` (260 passing; keep it th
   mistranscription becomes a variant. Optional `about:` is topic context for the
   summariser (Okta: SSO/identity/authorization — Octo/Octa in an access discussion
   is Okta). Dave Casal variants include Cazal. Comments in files explain measured
-  WHY, not what.
+  WHY, not what. Review UI "Add a glossary name" appends a correct-tier entry
+  (or a variant on an existing term) without dumping the file, so those comments
+  survive. Prompt-tier stays operator-edited: the 224-token budget is tight.
 - USB plug-in sends one email per conversation (same Outlook event only; no LLM
-  topic clustering). Weekday 07:30 sends the outstanding digest. Review UI:
+  topic clustering). A successful send is ledgered in summaries/.sent.json by the
+  set of source files; --files will not duplicate it. --resend is the override.
+  A later recording that joins the same Outlook event is a new key and still mails.
+  Weekday 07:30 sends the outstanding digest. Review UI:
   `scripts\review-ui.bat` (127.0.0.1 only). Mark done drops an item from the
   morning email; no executor runs. Approve stays on the digest until done.
 - `--force-keep` is a ONE-TIME override. Its sidecar is written `forced: true` and day

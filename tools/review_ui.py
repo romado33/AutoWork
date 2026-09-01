@@ -33,10 +33,12 @@ sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 from autowork.action import ActionRecord, Status  # noqa: E402
 from autowork.digest import group_by_recording_date  # noqa: E402
 from autowork.extract import collapse_same_recording  # noqa: E402
+from autowork.glossary import Glossary, GlossaryError  # noqa: E402
 from autowork.queue import QueueError, ReviewQueue  # noqa: E402
 from review import UNVERIFIED_DB, resolve, wall_clock  # noqa: E402
 
 DEFAULT_QUEUE = PROJECT_ROOT / "queue.sqlite3"
+DEFAULT_GLOSSARY = PROJECT_ROOT / "config" / "glossary.yml"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
@@ -70,6 +72,19 @@ PAGE_HTML = r"""<!DOCTYPE html>
   }
   header h1 { margin: 0; font-size: 1.15rem; font-weight: 650; }
   header p { margin: 6px 0 0; color: #cbbfae; font-size: 0.9rem; }
+  .glossary {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    margin-top: 12px;
+  }
+  .glossary span { color: #cbbfae; font-size: 0.85rem; margin-right: 4px; }
+  .glossary input {
+    font: inherit; border: 1px solid #3d372f; background: #2a2620; color: #f3efe6;
+    border-radius: 6px; padding: 6px 10px; width: 180px;
+  }
+  .glossary button {
+    font: inherit; border-radius: 8px; padding: 6px 12px; cursor: pointer;
+    border: 1px solid #cbbfae; background: transparent; color: #f3efe6;
+  }
   main { max-width: 820px; margin: 0 auto; padding: 20px 16px 64px; }
   .tabs { display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; align-items: center; }
   .tab {
@@ -126,6 +141,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <header>
   <h1>AutoWork review</h1>
   <p>Mark done to drop an item from the morning to-do email. Nothing here is executed.</p>
+  <form id="glossary-form" class="glossary">
+    <span>Add a glossary name</span>
+    <input id="g-term" placeholder="canonical (Okta)" autocomplete="off">
+    <input id="g-variant" placeholder="heard as (Octo)" autocomplete="off">
+    <button type="submit">Add</button>
+  </form>
 </header>
 <main>
   <div class="tabs">
@@ -291,6 +312,26 @@ document.addEventListener("click", async (ev) => {
 });
 
 load();
+
+$("glossary-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const term = $("g-term").value.trim();
+  const variant = $("g-variant").value.trim();
+  $("error").hidden = true;
+  const res = await fetch("/api/glossary", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({term, variant}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    $("error").hidden = false;
+    $("error").textContent = data.error || ("HTTP " + res.status);
+    return;
+  }
+  $("g-term").value = "";
+  $("g-variant").value = "";
+});
 </script>
 </body>
 </html>
@@ -353,6 +394,7 @@ def _is_local(handler: BaseHTTPRequestHandler) -> bool:
 
 class ReviewUIHandler(BaseHTTPRequestHandler):
     queue_path: Path = DEFAULT_QUEUE
+    glossary_path: Path = DEFAULT_GLOSSARY
 
     def log_message(self, fmt: str, *args: object) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -411,6 +453,23 @@ class ReviewUIHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": f"no queue database at {self.queue_path}"})
             return
 
+        if parts == ["api", "glossary"]:
+            term = str(payload.get("term") or "")
+            variant = str(payload.get("variant") or "")
+            try:
+                promoted = Glossary.promote(
+                    self.glossary_path, term, variant=variant
+                )
+            except GlossaryError as exc:
+                self._json(400, {"error": str(exc)})
+                return
+            self._json(200, {
+                "ok": True,
+                "term": promoted.term,
+                "variants": list(promoted.variants),
+            })
+            return
+
         if parts == ["api", "source", "reject"]:
             source = str(payload.get("source") or "")
             try:
@@ -464,13 +523,17 @@ def make_server(
     queue_path: Path,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
+    glossary_path: Path | None = None,
 ) -> HTTPServer:
     if host not in LOCAL_HOSTS:
         raise ValueError(f"refusing to bind {host!r}; this UI is localhost-only")
     handler = type(
         "BoundReviewUIHandler",
         (ReviewUIHandler,),
-        {"queue_path": Path(queue_path)},
+        {
+            "queue_path": Path(queue_path),
+            "glossary_path": Path(glossary_path or DEFAULT_GLOSSARY),
+        },
     )
     return HTTPServer((host, port), handler)
 
