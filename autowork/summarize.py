@@ -125,6 +125,12 @@ cited, options considered and why they were kept or dropped, constraints
 better than dropping a fact. Do not merge unrelated threads to stay under a
 topic count. Skip only greetings, weather, and garbled stretches.
 
+When speakers walk through a numbered list or feature table, keep a clearly
+labelled stretch per row they actually discussed: the feature name, what
+counts as a use, the source, the status, and any change they asked for. Two
+tables discussed in sequence are two sections, not one. Do not invent
+discussion of rows that were not spoken.
+
 Rules:
 - Only state what the transcript directly supports. Do not infer or fill gaps;
   omit anything uncertain rather than interpreting it.
@@ -176,7 +182,9 @@ appear in more than one part. Merge those into one entry rather than repeating t
 Distinct projects and workstreams stay separate: leftover work from last week \
 is not the same topic as a new project introduced later in the same call. Keep \
 the specifics -- numbers, names, systems, options considered, constraints. \
-Drop nothing substantive.
+When a part is a row-by-row feature-table walkthrough, keep each discussed \
+row; do not collapse a table walkthrough into one sentence. Drop nothing \
+substantive.
 
 Return JSON in the same shape.
 """

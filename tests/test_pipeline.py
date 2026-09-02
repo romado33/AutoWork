@@ -87,9 +87,14 @@ def run(monkeypatch, tmp_path):
 
     monkeypatch.setattr(run_pipeline, "summarise", stub_summarise)
     sent: list = []
-    monkeypatch.setattr(
-        run_pipeline, "send", lambda *a, **k: sent.append(a) or "stubbed"
-    )
+    sent_kwargs: list = []
+
+    def stub_send(*a, **k):
+        sent.append(a)
+        sent_kwargs.append(k)
+        return "stubbed"
+
+    monkeypatch.setattr(run_pipeline, "send", stub_send)
 
     transcripts = tmp_path / "transcripts"
     transcripts.mkdir()
@@ -109,6 +114,7 @@ def run(monkeypatch, tmp_path):
     go.transcripts = transcripts
     go.queue = tmp_path / "queue.sqlite3"
     go.sent = sent
+    go.sent_kwargs = sent_kwargs
     go.summarised = summarised
     return go
 
@@ -319,3 +325,106 @@ def test_extract_of_one_file_overlaps_transcribe_of_the_next(run, monkeypatch) -
     assert e1_start < t2_end and t2_start < e1_end, (
         "extract of the first file ran only after the second transcription finished"
     )
+
+
+def test_raw_transcript_is_spoken_text_not_gate_metadata() -> None:
+    """The mailed .md transcript is for audit (quality, offsets). The operator
+    asked for the words as well, without speech-minus-rumble wrapping them.
+    """
+    from autowork.gate import Verdict
+    from autowork.transcribe import TranscribedSegment
+
+    segs = [
+        TranscribedSegment(
+            source_audio="R2026-09-02-11-02-43.MP3",
+            start_sec=72,
+            end_sec=140,
+            verdict=Verdict.CLEAN,
+            speech_rumble_db=6.6,
+            text="Work History is ready, needs a token.",
+            speakers=[
+                {"speaker": "A", "start": 72.0, "text": "Work History is ready, needs a token."},
+                {"speaker": "B", "start": 91.0, "text": "And then AI text transformation."},
+            ],
+        )
+    ]
+    raw = run_pipeline.render_raw_transcript(Path("R2026-09-02-11-02-43.MP3"), segs)
+    assert "Work History is ready, needs a token." in raw
+    assert "And then AI text transformation." in raw
+    assert "[01:12 A]" in raw
+    assert "speech-minus-rumble" not in raw
+    assert "**clean**" not in raw
+
+
+def test_cached_run_writes_raw_transcript_and_attaches_it(run, monkeypatch) -> None:
+    """A USB run already wrote transcripts/*.md; the operator still did not get
+    the words in the inbox. Write stem.raw.txt and attach it to the summary mail.
+    """
+    monkeypatch.setattr(
+        run_pipeline,
+        "summarise",
+        lambda *a, **k: Summary(
+            headline="Okta access review",
+            topics=[{"label": "Okta", "summary": "Move the review to Thursday."}],
+            decisions=[],
+            open_questions=[],
+        ),
+    )
+    audio = make_recording(run, "R2026-08-26-09-04-45", WORK)
+    assert run("--files", str(audio), "--no-extract", "--to", "rob@example.com") == 0
+    raw = run.transcripts / "R2026-08-26-09-04-45.raw.txt"
+    assert raw.is_file()
+    text = raw.read_text(encoding="utf-8")
+    assert WORK in text
+    assert "speech-minus-rumble" not in text
+    assert len(run.sent) == 1
+    attached = run.sent_kwargs[0].get("attachments") or []
+    assert [p.name for p in attached] == ["R2026-08-26-09-04-45.raw.txt"]
+
+
+def test_operator_context_reaches_the_summariser(run, tmp_path, monkeypatch) -> None:
+    """2026-09-02 Dan/Aurea: two feature tables were on screen. Without them as
+    context the summary cannot map Whisper near-misses onto the numbered rows
+    or keep per-row changes. The tables are a roster, not a second source of facts.
+    """
+    extras: list[str] = []
+
+    def stub_summarise(text, *a, extra_instructions="", **k):
+        extras.append(extra_instructions)
+        return Summary(
+            headline="stub",
+            topics=[{"label": "Work History", "summary": "needs token"}],
+            decisions=[],
+            open_questions=[],
+        )
+
+    monkeypatch.setattr(run_pipeline, "summarise", stub_summarise)
+    table = tmp_path / "features.md"
+    table.write_text("| # | Feature |\n| 1 | Work History |\n", encoding="utf-8")
+    audio = make_recording(run, "R2026-08-26-09-04-45", WORK)
+    assert run(
+        "--files", str(audio), "--context", str(table), "--no-extract", "--no-email"
+    ) == 0
+    assert extras, "summarise was not called"
+    blob = extras[0]
+    assert "Work History" in blob
+    assert "Do not invent discussion" in blob
+    assert "features.md" in blob
+
+
+def test_html_context_drops_css_and_keeps_table_cells() -> None:
+    html = """
+    <html><head><style>.secret { background: magenta; }</style></head>
+    <body>
+      <h1>CSM Feature Shortlist</h1>
+      <table>
+        <tr><th>Feature</th><th>Status</th></tr>
+        <tr><td>TrueContext Teamwork</td><td>Live</td></tr>
+      </table>
+    </body></html>
+    """
+    text = run_pipeline.html_to_visible_text(html)
+    assert "TrueContext Teamwork" in text
+    assert "Live" in text
+    assert "magenta" not in text
+    assert "background" not in text

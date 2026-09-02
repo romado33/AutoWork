@@ -33,6 +33,9 @@ terms:
   - term: Dan
     tier: prompt
     variants: []
+  - term: Aurea
+    tier: correct
+    variants: [Aria, Oreo]
   - term: Dave Casal
     tier: correct
     variants: [Dave Cazale, Dave Casali, Dave Cotel, Dave Casal, Dave Cazal, Casal, Cazal]
@@ -223,6 +226,10 @@ terms:
     tier: correct
     variants: [User Pilot, user product]
     about: [in-app guidance, web portal clicks]
+  - term: Qrvey
+    tier: correct
+    variants: []
+    about: [bespoke analytics, dashboards]
 
 # Terms the correction pass could not resolve get written here for you to name.
 # This is the "ask me to clarify" loop: review them, promote the real ones into

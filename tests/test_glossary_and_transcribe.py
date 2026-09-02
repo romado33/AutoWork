@@ -316,6 +316,9 @@ def test_operator_summary_prompt_keeps_named_projects_separate() -> None:
     assert "at most two sentences" not in text.lower()
     assert "Distinct projects and workstreams stay separate" in MERGE_PROMPT
     assert "Drop nothing substantive" in MERGE_PROMPT
+    assert "feature table" in text.lower()
+    assert "per row" in text.lower()
+    assert "table walkthrough" in MERGE_PROMPT.lower()
 
 
 def test_project_glossary_loads_okta_context() -> None:

@@ -187,6 +187,6 @@ and finds all three.
 .venv\Scripts\python.exe -m pytest tests -q
 ```
 
-275 tests, no network required. The valuable ones encode real measurements: the gate
+280 tests, no network required. The valuable ones encode real measurements: the gate
 calibration table, the verbatim hallucination strings the loop detector must catch, and
 the credential mistakes that actually happened (a pasted app password with spaces in it).

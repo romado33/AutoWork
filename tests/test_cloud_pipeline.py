@@ -161,6 +161,24 @@ def test_message_has_the_headers_a_mail_client_needs() -> None:
     assert message["Date"]
 
 
+def test_message_attaches_raw_transcript(tmp_path) -> None:
+    raw = tmp_path / "R2026-09-02-11-02-43.raw.txt"
+    raw.write_text("Work History is ready, needs a token.\n", encoding="utf-8")
+    message = build_message(
+        sender="a@b.com", sender_name="AutoWork", recipient="c@d.com",
+        subject="Work summary", text_body="body", html_body="<p>body</p>",
+        attachments=[raw],
+    )
+    names = [
+        part.get_filename()
+        for part in message.iter_attachments()
+    ]
+    assert names == ["R2026-09-02-11-02-43.raw.txt"]
+    payloads = list(message.iter_attachments())
+    body = payloads[0].get_payload(decode=True)
+    assert b"Work History is ready" in body
+
+
 def test_empty_recipient_is_refused() -> None:
     """Expected failure: a summary sent nowhere must not look like success."""
     from autowork.mailer import send

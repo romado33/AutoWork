@@ -32,6 +32,7 @@ import ssl
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ def build_message(
     subject: str,
     text_body: str,
     html_body: str | None = None,
+    attachments: list[Path] | None = None,
 ) -> EmailMessage:
     message = EmailMessage()
     message["From"] = formataddr((sender_name, sender))
@@ -140,6 +142,17 @@ def build_message(
     message.set_content(text_body)
     if html_body:
         message.add_alternative(html_body, subtype="html")
+    for path in attachments or []:
+        payload = path.read_bytes()
+        # text/plain so a mail client opens the raw transcript as words, not a download
+        # of unknown type. Filename keeps the recording stem so two files in one
+        # conversation (the recorder splits at 60 minutes) stay distinct.
+        message.add_attachment(
+            payload,
+            maintype="text",
+            subtype="plain",
+            filename=path.name,
+        )
     return message
 
 
@@ -148,6 +161,7 @@ def send(
     subject: str,
     text_body: str,
     html_body: str | None = None,
+    attachments: list[Path] | None = None,
     config: MailConfig | None = None,
 ) -> str:
     """Send one message. Returns a short confirmation string.
@@ -167,6 +181,7 @@ def send(
         subject=subject,
         text_body=text_body,
         html_body=html_body,
+        attachments=attachments,
     )
 
     context = ssl.create_default_context()

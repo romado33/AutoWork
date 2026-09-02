@@ -8,6 +8,7 @@ Usage:
     python tools/run_pipeline.py --no-diarize          # faster, no speaker labels
     python tools/run_pipeline.py --dry-run             # gate only, upload nothing
     python tools/run_pipeline.py --resend              # email even if already sent
+    python tools/run_pipeline.py --context table.md    # feature tables / notes for this summary
 
 Configuration lives in .env, never in source or on the command line:
 
@@ -35,8 +36,10 @@ import argparse
 import glob
 import logging
 import os
+import re
 import sys
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -145,6 +148,129 @@ def render_transcript(path: Path, segs: list, glossary: Glossary | None = None) 
             lines.append(footer.rstrip("\n"))
             lines.append("")
     return "\n".join(lines)
+
+
+def _clock(seconds: float) -> str:
+    total = max(0, int(seconds))
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+_MARKUP_LINE = re.compile(r"^\s*</?(details|summary|div|p|br)\b", re.I)
+
+
+def render_raw_transcript(path: Path, segs: list) -> str:
+    """Spoken words only. The markdown transcript is the audit copy (gate, offsets);
+    this is what the operator asked to read, and what the summary email attaches.
+    Gate-rejected audio is omitted: Whisper invents fluent text from low-signal input.
+    """
+    lines = [
+        f"Raw transcript — {path.name}",
+        "",
+        "Only audio that passed the quality gate is included. Rejected stretches",
+        "were not transcribed, because Whisper invents fluent text from low-signal input.",
+        "",
+    ]
+    for seg in segs:
+        turns = [
+            t for t in (getattr(seg, "speakers", None) or [])
+            if (t.get("text") or "").strip()
+        ]
+        if turns:
+            for turn in turns:
+                stamp = turn.get("start")
+                if stamp is None:
+                    stamp = seg.start_sec
+                speaker = turn.get("speaker") or "?"
+                lines.append(f"[{_clock(stamp)} {speaker}] {turn['text'].strip()}")
+            lines.append("")
+            continue
+        spoken = [
+            line for line in (seg.text or "").splitlines()
+            if line.strip() and not _MARKUP_LINE.match(line)
+        ]
+        if not spoken:
+            continue
+        lines.append(f"[{_clock(seg.start_sec)}–{_clock(seg.end_sec)}]")
+        lines.extend(spoken)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_raw_transcript(transcript_dir: Path, path: Path, segs: list) -> Path:
+    target = transcript_dir / f"{path.stem}.raw.txt"
+    target.write_text(render_raw_transcript(path, segs), encoding="utf-8")
+    return target
+
+
+class _VisibleHTML(HTMLParser):
+    """Tables and headings, not CSS. Operator context must not dump a styled HTML
+    file's stylesheets into the summary prompt."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in {"style", "script"}:
+            self._skip += 1
+        elif tag == "br":
+            self.parts.append("\n")
+        elif tag in {"p", "div", "h1", "h2", "h3", "li", "tr"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"style", "script"} and self._skip:
+            self._skip -= 1
+        elif tag in {"td", "th"}:
+            self.parts.append(" | ")
+        elif tag in {"p", "div", "h1", "h2", "h3", "tr", "table"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip:
+            return
+        text = " ".join(data.split())
+        if text:
+            self.parts.append(text)
+
+
+def html_to_visible_text(html: str) -> str:
+    parser = _VisibleHTML()
+    parser.feed(html)
+    parser.close()
+    text = "".join(parser.parts)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"(?:\s*\|\s*){2,}", " | ", text)
+    return text.strip()
+
+
+_CONTEXT_CAP = 24_000
+
+
+def load_operator_context(paths: list[Path]) -> str:
+    """Reference material for this summary only: feature tables, notes.
+
+    Resolves Whisper near-misses onto the names the speakers were looking at.
+    Not a second source of facts — the transcript still has to support every claim.
+    """
+    if not paths:
+        return ""
+    chunks: list[str] = [
+        "The speakers were working from the following operator-supplied "
+        "reference(s). Use them to resolve feature names and to keep per-row "
+        "details that were actually spoken (what counts as a use, source, status, "
+        "requested changes). Do not summarise the reference itself. Do not invent "
+        "discussion of rows that were not spoken.",
+    ]
+    for path in paths:
+        raw = path.read_text(encoding="utf-8")
+        body = html_to_visible_text(raw) if path.suffix.lower() in {".html", ".htm"} else raw.strip()
+        if len(body) > _CONTEXT_CAP:
+            body = body[:_CONTEXT_CAP] + "\n[truncated]\n"
+        chunks.append(f"--- reference: {path.name} ---\n{body}")
+    return "\n\n".join(chunks)
 
 
 def speaker_max(segments: list) -> int:
@@ -307,6 +433,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="gate only, no uploads")
     parser.add_argument("--to", default=None, help="summary recipient")
+    parser.add_argument(
+        "--context",
+        nargs="+",
+        default=[],
+        metavar="FILE",
+        help="operator reference (feature tables, notes) for this summary only",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -330,6 +463,12 @@ def main(argv: list[str] | None = None) -> int:
         glossary = Glossary.load(PROJECT_ROOT / "config" / "glossary.yml")
     except GlossaryError as exc:
         print(f"glossary: {exc}", file=sys.stderr)
+        return 2
+
+    context_paths = [Path(p) for p in args.context]
+    missing = [str(p) for p in context_paths if not p.is_file()]
+    if missing:
+        print(f"context file not found: {', '.join(missing)}", file=sys.stderr)
         return 2
 
     # --- 1. gather ------------------------------------------------------------
@@ -496,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
                     return
 
             cached = "\n\n".join(s.text for s in cached_segments if s.text.strip())
+            write_raw_transcript(transcript_dir, path, cached_segments)
             touch(note_contribution(
                 transcript_dir, path, keep=True, text=cached,
                 audio_minutes=sum(s.duration_sec for s in cached_segments) / 60,
@@ -562,6 +702,7 @@ def main(argv: list[str] | None = None) -> int:
         joined_raw = "\n\n".join(s.text for s in kept_segs)
 
         target.write_text(render_transcript(path, segs, glossary), encoding="utf-8")
+        write_raw_transcript(transcript_dir, path, segs)
         uploaded = sum(s.uploaded_bytes for s in segs) / 1e6
         audio_min = sum(s.duration_sec for s in segs) / 60
         print(f"  transcribed {audio_min:.1f} min ({uploaded:.2f} MB uploaded) "
@@ -666,7 +807,12 @@ def main(argv: list[str] | None = None) -> int:
         if not combined.strip():
             continue
         try:
-            extra = FORCE_KEEP_PROMPT if args.force_keep else ""
+            extra_parts: list[str] = []
+            if args.force_keep:
+                extra_parts.append(FORCE_KEEP_PROMPT)
+            if args.context:
+                extra_parts.append(load_operator_context(context_paths))
+            extra = "\n\n".join(p for p in extra_parts if p.strip())
             summary = summarise(
                 combined,
                 recorded_at=convo.meta.recorded_at,
@@ -744,9 +890,18 @@ def main(argv: list[str] | None = None) -> int:
             print("  already emailed this conversation; pass --resend to send again")
             continue
         body = summary.to_text(actions=convo_actions)
+        attachments = [
+            p for name in convo.source_files
+            if (p := transcript_dir / f"{Path(name).stem}.raw.txt").is_file()
+        ]
         try:
-            print("  " + send(recipient, subject, body,
-                              html_body=summary.to_html(actions=convo_actions)))
+            print("  " + send(
+                recipient, subject, body,
+                html_body=summary.to_html(actions=convo_actions),
+                attachments=attachments or None,
+            ))
+            if attachments:
+                print(f"  attached {len(attachments)} raw transcript(s)")
         except MailError as exc:
             print(f"  email failed: {exc}", file=sys.stderr)
             failures += 1
