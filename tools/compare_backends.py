@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Measure local versus cloud extraction on the same transcript: latency and recall.
+"""Measure one cloud backend against another on the same transcript: latency and recall.
 
 Usage:
     python tools/compare_backends.py transcripts/R2026-08-25-13-23-54.md
-    python tools/compare_backends.py <transcript> --backends ollama:gemma3:4b anthropic:claude-sonnet-5
+    python tools/compare_backends.py <transcript> --backends openai:gpt-5.4-mini anthropic:claude-sonnet-5
     python tools/compare_backends.py <transcript> --no-prefilter    # measure the full cost
 
 Requires ANTHROPIC_API_KEY (or `ant auth login`) for any anthropic backend.
@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--backends",
         nargs="+",
-        default=["ollama:gemma3:4b", "openai:gpt-5.4-mini"],
+        default=["anthropic:claude-sonnet-5", "openai:gpt-5.4-mini"],
     )
     parser.add_argument("--no-prefilter", action="store_true")
     parser.add_argument("--owner", default="Rob")

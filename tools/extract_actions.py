@@ -9,7 +9,8 @@ Extraction uses the configured cloud backend (see autowork/extract.py), never a
 local model. Only prefiltered commitment-bearing passages are sent.
 
 Configurable rather than hardcoded:
-    AUTOWORK_QUEUE           queue database    (default: ./queue.sqlite3)
+    AUTOWORK_QUEUE           queue database     (default: ./queue.sqlite3)
+    AUTOWORK_BACKEND_EXTRACT extraction backend (default: openai:gpt-5.4-mini)
 
 Everything filed lands as PENDING. Nothing is executed, and nothing is approved, by
 this tool. Re-running on the same transcript is idempotent: the queue dedupes on source
@@ -31,6 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from autowork.extract import (  # noqa: E402
+    DEFAULT_BACKEND,
     Candidate,
     ExtractionError,
     ExtractorConfig,
@@ -140,19 +142,39 @@ def report(accepted: list, rejected: list[Candidate], dry_run: bool) -> None:
         print("    (dry run: nothing filed)")
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("transcripts", nargs="+")
-    parser.add_argument("--model", default=os.environ.get("AUTOWORK_MODEL_EXTRACT", "gemma3:4b"))
-    parser.add_argument("--ollama-url",
-                        default=os.environ.get("AUTOWORK_OLLAMA_URL", "http://localhost:11434"))
+    parser.add_argument("--backend",
+                        default=os.environ.get("AUTOWORK_BACKEND_EXTRACT", DEFAULT_BACKEND))
     parser.add_argument("--queue", default=os.environ.get("AUTOWORK_QUEUE", DEFAULT_QUEUE))
     parser.add_argument("--owner", default="Rob")
     parser.add_argument("--min-confidence", type=float, default=0.3)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def config_from_args(args: argparse.Namespace) -> ExtractorConfig:
+    """Map parsed CLI arguments onto the extractor config.
+
+    Split out so a test can prove the mapping still matches ExtractorConfig's real
+    fields. This wiring passed `model` and `ollama_url` long after the dataclass
+    dropped them, so every CLI invocation died on TypeError while the module stayed
+    importable and the suite stayed green: the callers only import parse_transcript,
+    which never touches the config.
+    """
+    return ExtractorConfig(
+        backend=args.backend,
+        owner_name=args.owner,
+        min_confidence=args.min_confidence,
+        timeout_sec=args.timeout,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
@@ -166,13 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        config = ExtractorConfig(
-            model=args.model,
-            ollama_url=args.ollama_url,
-            owner_name=args.owner,
-            min_confidence=args.min_confidence,
-            timeout_sec=args.timeout,
-        )
+        config = config_from_args(args)
     except ExtractionError as exc:
         print(f"configuration: {exc}", file=sys.stderr)
         return 2

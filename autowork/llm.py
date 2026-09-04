@@ -308,10 +308,11 @@ def load_dotenv(path: str | os.PathLike = ".env") -> None:
 
 
 def build_backend(spec: str, **kwargs) -> Backend:
-    """Build a backend from a "kind:model" string, e.g. "ollama:gemma3:4b".
+    """Build a backend from a "kind:model" string, e.g. "openai:gpt-5.4-mini".
 
     A string keeps the choice in config and out of the call sites, which is what makes
-    local-versus-cloud a one-line change rather than a refactor.
+    swapping provider a one-line change rather than a refactor. Local backends were
+    evaluated and dropped; only "openai" and "anthropic" are accepted.
     """
     kind, _, model = spec.partition(":")
     kind = kind.strip().lower()
