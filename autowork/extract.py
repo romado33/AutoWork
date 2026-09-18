@@ -127,14 +127,27 @@ Do NOT extract:
   - things already done ("I updated it yesterday")
   - meeting logistics ("can you see my screen")
   - anything where you cannot quote a specific sentence supporting it
+  - a speaker saying they need to think, look, or research more unless they \
+named the object of that work. Measured failure (2026-09-03 12:10): \
+"Research further before giving input" was queued from "I need to research \
+more... before I can give any meaningful input" in a garbled stretch.
+  - a title whose object is a pronoun. Measured failure (2026-09-03 11:10): \
+"Create it from the backlog tool" -- the quote was about a placeholder Epic \
+in Salesforce; the title did not say so.
+
+Title and body must name the artifact and the system: "Create a Salesforce \
+placeholder Epic when there are no linked accounts", not "Create it". \
+"Look for another way to capture mobile-app usage data; current capture is \
+not activated", not "Explore another way to capture app adoption data" if \
+the spoken object was more specific.
 
 The transcript comes from a pocket microphone and may contain transcription errors. \
 If a passage is garbled, do not guess at what it meant. Skip it.
 
 Return ONLY JSON of this exact shape:
 {"actions": [{
-  "title": "short imperative summary, under 80 characters",
-  "body": "what specifically needs doing, and any detail stated in the conversation",
+  "title": "imperative that names the artifact and system, under 80 characters",
+  "body": "who will do what, to which object, in which system, plus any constraint spoken",
   "owner": "me" | "other" | "unclear",
   "target_system": one of the allowed systems listed below,
   "action_type": "create" | "update" | "comment" | "message" | "task",
@@ -319,6 +332,8 @@ def ground(candidates: list[Candidate], source_text: str, config: ExtractorConfi
                 f"confidence {candidate.confidence:.2f} below "
                 f"{config.min_confidence:.2f}"
             )
+        elif reason := nonspecific_action_reason(candidate.title, candidate.body):
+            candidate.rejected_because = reason
     return candidates
 
 
@@ -427,6 +442,36 @@ _TITLE_STOP = frozenset({
     "a", "an", "the", "with", "for", "to", "of", "and", "or", "in", "on",
     "at", "from", "as", "by", "is", "be", "it", "its",
 })
+
+# Hedged "I need to research more" titles from 2026-09-03 12:10. Tokens that do
+# not name an object of work.
+_VAGUE_WORK_WORDS = frozenset({
+    "research", "further", "more", "before", "giving", "give", "any", "meaningful",
+    "input", "issue", "need", "think", "trying", "try", "look", "into", "about",
+    "doing", "do", "can", "will", "would", "should", "maybe",
+})
+
+
+def nonspecific_action_reason(title: str, body: str) -> str | None:
+    """Why this to-do is not actionable, or None to keep it.
+
+    2026-09-03 11:10 queued 'Create it from the backlog tool' -- the quote was a
+    placeholder Epic in Salesforce; the title's object was a pronoun.
+    2026-09-03 12:10 queued 'Research further before giving input' from a hedge
+    in a garbled stretch. A to-do without a named object is not a to-do.
+    """
+    if re.search(
+        r"\b(create|update|send|share|add|fix|move)\s+it\b", title, re.I
+    ):
+        return "title object is a pronoun with no named artifact"
+    if re.match(r"^(research|do more research|look into it)\b", title.strip(), re.I):
+        tokens = [
+            w for w in re.findall(r"[a-z0-9']+", f"{title} {body}".lower())
+            if w not in _TITLE_STOP and w not in _VAGUE_WORK_WORDS
+        ]
+        if not tokens:
+            return "no named object of work"
+    return None
 
 
 def title_tokens(title: str) -> frozenset[str]:

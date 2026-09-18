@@ -3,7 +3,7 @@
 Pocket voice recorder -> ingest by volume serial -> audio quality gate -> cloud
 transcription with diarization -> relevance gate -> summary email + grounded action
 items in a human review queue. Python 3.11+, three deps (openai, PyYAML, pytest),
-ffmpeg required. Run tests: `python -m pytest tests -q` (260 passing; keep it that way).
+ffmpeg required. Run tests: `python -m pytest tests -q` (272 passing; keep it that way).
 
 ## Safety invariants — never weaken these
 
