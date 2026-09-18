@@ -244,6 +244,22 @@ def test_operator_summary_prompt_has_glossary_slot() -> None:
     assert "near-miss" in text
 
 
+def test_summary_prompt_drops_salad_and_keeps_named_follow_ups() -> None:
+    """2026-09-03 12:10 mailed 'the one globe', CIT-for-the-other-one, and
+    cell-tower records as real topics, then 'Research further' as a to-do.
+    Two-sentence caps were dropping the useful half; salad was kept.
+    """
+    from autowork.summarize import load_summary_prompt
+
+    text = load_summary_prompt()
+    assert "at most six topics" not in text.lower()
+    assert "at most two sentences" not in text.lower()
+    assert "the one globe" in text
+    assert "cell-tower" in text
+    assert "Compress filler" in text or "not substance" in text
+    assert "named object" in text.lower() or "who will do what" in text.lower()
+
+
 def test_project_glossary_loads_okta_context() -> None:
     """The live glossary must teach the summariser that Octo-in-auth is Okta."""
     from pathlib import Path
@@ -486,3 +502,46 @@ def test_clarify_list_filters_interjections_but_keeps_mixed_case_names(tmp_path)
     assert "Calvin" in unknown
     for interjection in ("Yeah", "Hey", "Yep", "Okay"):
         assert interjection not in unknown
+
+
+def test_sit_is_not_rewritten_to_cit() -> None:
+    """2026-09-03 12:10: 'I have to sit around the other one' was rewritten to
+    CIT, and the summary then invented a Customer Intelligence workstream from
+    pocket-noise. sit is ordinary English; it must not be a CIT variant.
+    """
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    cit = next(t for t in g.terms if t.term == "CIT")
+    assert "sit" not in {v.lower() for v in cit.variants}
+    fixed, applied = g.correct(
+        "So I have to sit around the other one. I don't know."
+    )
+    assert "sit around" in fixed
+    assert "CIT" not in fixed
+    assert "CIT" not in applied
+
+
+def test_clarify_list_skips_months_god_and_known_observability_names() -> None:
+    """2026-09-03 11:10 mailed Android and Sentry as terms to clarify, plus
+    September/God/Cause from the same transcript. Sentry is a known system;
+    month names and 'oh my God' are not names to promote.
+    """
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    text = (
+        "Yeah, I think that was left over from when we were wondering whether it "
+        "was going to be New Relic or Sentry or we weren't wondering but Claude "
+        "was because it thought that there was an issue with Sentry data where it "
+        "wasn't recording on Android what was doing on Android basically. "
+        "I don't mean by mid-September. Oh my God. Cause I do have like I need "
+        "my extra screen. Satish's Claude's latest status update."
+    )
+    unknown = g.unknown_proper_nouns(text)
+    assert "Sentry" not in unknown
+    assert "Android" not in unknown
+    assert "September" not in unknown
+    assert "God" not in unknown
+    assert "Cause" not in unknown
+    assert "Satish" not in unknown

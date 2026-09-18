@@ -178,6 +178,67 @@ def test_empty_required_fields_are_rejected(field: str, expected: str) -> None:
     assert c.rejected_because == expected
 
 
+def test_create_it_title_is_rejected_without_a_named_artifact() -> None:
+    """2026-09-03 11:10 queued 'Create it from the backlog tool'. The quote named
+    an Epic; the title did not, so the email to-do was an empty pronoun.
+    """
+    c = candidate(
+        title="Create it from the backlog tool",
+        body="Create it using the backlog tool, as discussed.",
+        quote="so it's just just to create it from the backlog tool",
+    )
+    source = "Um so it's just just to create it from the backlog tool. Okay."
+    ground([c], source, config())
+    assert c.rejected_because == "title object is a pronoun with no named artifact"
+
+
+def test_research_further_without_an_object_is_rejected() -> None:
+    """2026-09-03 12:10 queued 'Research further before giving input' from a
+    garbled stretch ('I need to research more... before I can give any meaningful
+    input'). That is a hedge, not a to-do.
+    """
+    quote = "I need to research more, I think, before I I can give any meaningful input"
+    c = candidate(
+        title="Research further before giving input",
+        body="Do more research before trying to give meaningful input on the issue.",
+        quote=quote,
+    )
+    ground([c], quote + ".", config())
+    assert c.rejected_because == "no named object of work"
+
+
+def test_specific_create_and_explore_titles_still_pass() -> None:
+    """The pronoun/hedge rejects must not eat real items from the same days."""
+    epic = candidate(
+        title="Create a Salesforce placeholder Epic when there are no linked accounts",
+        body="Create a placeholder Epic in Salesforce even if there are no linked accounts.",
+        quote="that we could create a kind of place holder ethic in Salesforce even if there's no linked accounts",
+        target_system="salesforce",
+        action_type="create",
+    )
+    source = (
+        "that we could create a kind of place holder ethic in Salesforce even if "
+        "there's no linked accounts Right, that it's storing right."
+    )
+    ground([epic], source, config(target_systems=("salesforce", "notes", "cit")))
+    assert epic.rejected_because is None
+
+    explore = candidate(
+        title="Look for another way to capture mobile-app usage data",
+        body="Current app-usage capture is not activated; recircuit for another source.",
+        quote="How about I'll I'll recircuit and see if there's any other way we could capture that data around app app, because I think it is a really useful feature to know what people are using it.",
+        target_system="notes",
+    )
+    recircuit = (
+        "How about I'll I'll recircuit and see if there's any other way we could "
+        "capture that data around app app, because I think it is a really useful "
+        "feature to know what people are using it. But yeah, I I concur that what "
+        "it has here isn't really activated."
+    )
+    ground([explore], recircuit, config())
+    assert explore.rejected_because is None
+
+
 def test_nothing_is_silently_dropped() -> None:
     """Every candidate comes back, failures annotated. A model that proposes only
     garbage must look different from a quiet day with no action items."""
@@ -200,6 +261,15 @@ def test_parses_well_formed_reply() -> None:
     parsed = parse_candidates(raw, config())
     assert len(parsed) == 1
     assert parsed[0].confidence == 0.7
+
+
+def test_extract_prompt_requires_a_named_object() -> None:
+    """Same 2026-09-03 failures: titles were 'Create it' and 'Research further'."""
+    from autowork.extract import SYSTEM_PROMPT
+
+    assert "Create it from the backlog tool" in SYSTEM_PROMPT
+    assert "Research further before giving input" in SYSTEM_PROMPT
+    assert "named the object" in SYSTEM_PROMPT.lower()
 
 
 def test_empty_action_list_is_valid_not_an_error() -> None:

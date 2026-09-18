@@ -101,7 +101,7 @@ terms:
     variants: [personal intelligence tool, customer intelligent tool]
   - term: CIT
     tier: prompt
-    variants: [C.I.T., sit, kit]
+    variants: [C.I.T., kit]
   - term: opportunity
     tier: prompt
     variants: []
@@ -130,7 +130,7 @@ terms:
     variants: [Jeera, Gyra, Jera]
   - term: Salesforce
     tier: prompt
-    variants: [Sales Force]
+    variants: [Sales Force, Excel force, Excel Force]
   - term: Confluence
     tier: correct
     variants: []
@@ -210,6 +210,27 @@ terms:
   - term: submission
     tier: correct
     variants: []
+  - term: New Relic
+    tier: correct
+    variants: []
+    about: [APM, observability, usage metrics]
+  - term: Sentry
+    tier: correct
+    variants: []
+    about: [error tracking, mobile instrumentation]
+  - term: Android
+    tier: correct
+    variants: []
+  - term: UserPilot
+    tier: correct
+    variants: [User Pilot, user product]
+    about: [in-app guidance, web portal clicks]
+  - term: Satish
+    tier: correct
+    variants: []
+  - term: recirculate
+    tier: correct
+    variants: [recircuit]
 
 # Terms the correction pass could not resolve get written here for you to name.
 # This is the "ask me to clarify" loop: review them, promote the real ones into

@@ -56,8 +56,16 @@ INTERJECTIONS = frozenset(
         "actually", "maybe", "sure", "thanks", "correct", "exactly", "alright",
         "because", "what", "why", "how", "when", "where", "who", "the", "this",
         "that", "there", "they", "you", "your", "our", "not", "for", "with", "from",
+        "god", "cause",
     }
 )
+
+# Whisper capitalises dates. They are not names to promote.
+_CALENDAR_WORDS = frozenset({
+    "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+})
 
 
 class GlossaryError(RuntimeError):
@@ -305,7 +313,11 @@ class Glossary:
         # "OpenSearch". Those are the ones Whisper is least likely to have spelled right.
         for match in re.finditer(r"(?<![.!?]\s)(?<!^)\b([A-Z][A-Za-z]{2,})\b", text, re.M):
             word = match.group(1)
-            if word.lower() in known or word.lower() in INTERJECTIONS:
+            if (
+                word.lower() in known
+                or word.lower() in INTERJECTIONS
+                or word.lower() in _CALENDAR_WORDS
+            ):
                 continue
             counts[word] = counts.get(word, 0) + 1
 
