@@ -285,8 +285,11 @@ def test_actions_render_with_their_grounding_quote() -> None:
     )
     text = summary().to_text(actions=[action])
 
-    assert "TO DO (1)" in text
+    assert "ROB'S FOLLOW-UPS (1)" in text
     assert "Finalise the backlog tool" in text
+    assert "Who     Rob" in text
+    assert "What    Take it up again with Dave Casale." in text
+    assert "System  backlog-tool" in text
     assert "I should take it up again with Dave Casale" in text
     assert "confidence 0.82" in text
     # The email must never imply anything was done.
@@ -343,17 +346,18 @@ def test_todo_only_includes_this_recordings_actions() -> None:
     html = rendered.to_html(actions=[todays, yesterdays])
     markdown = rendered.to_markdown(actions=[todays, yesterdays])
 
-    assert "TO DO (1)" in text
+    assert "ROB'S FOLLOW-UPS (1)" in text
     assert "Check the backlog tool permissions" in text.split("STILL PENDING")[0]
     assert "Finalize backlog tool design" in text.split("STILL PENDING")[1]
     assert "Tuesday 25 August 2026, 13:23" in text
     assert "Not from this recording" in text
     assert "STILL PENDING FROM EARLIER RECORDINGS (1)" in text
 
-    assert "To do (1)" in html
+    assert "Rob's follow-ups (1)" in html
     assert "Still pending from earlier recordings (1)" in html
     assert "Finalize backlog tool design" in html
     assert "## Still pending from earlier recordings (1)" in markdown
+    assert "## Rob's follow-ups (1)" in markdown
 
 
 def test_other_day_actions_are_not_dropped_when_today_has_none() -> None:
@@ -368,6 +372,7 @@ def test_other_day_actions_are_not_dropped_when_today_has_none() -> None:
     s.meta.source_files = ["R2026-08-26-09-04-45.MP3"]
     text = s.to_text(actions=[older])
 
+    assert "FOLLOW-UPS" not in text
     assert "TO DO" not in text
     assert "STILL PENDING FROM EARLIER RECORDINGS (1)" in text
     assert "Add quote quality threshold" in text
@@ -375,8 +380,132 @@ def test_other_day_actions_are_not_dropped_when_today_has_none() -> None:
 
 
 def test_no_actions_means_no_todo_section() -> None:
-    """Edge: an empty TO DO heading reads as a bug."""
-    assert "TO DO" not in summary().to_text(actions=[])
+    """Edge: an empty follow-ups heading reads as a bug."""
+    text = summary().to_text(actions=[])
+    assert "TO DO" not in text
+    assert "FOLLOW-UPS" not in text
+
+
+def test_ping_him_title_displays_the_artifact_not_the_pronoun() -> None:
+    """2026-09-21 09:45 emailed 'Ping him again about the Uber Expo email'
+    (Whisper miss for Salesforce). Display still rewrites the pronoun.
+    """
+    from autowork.summarize import display_action_title
+
+    assert display_action_title(
+        "Ping him again about the Salesforce email"
+    ) == "Follow up on the Salesforce email"
+
+    action = _action(
+        "Ping him again about the Salesforce email",
+        "R2026-09-21-09-45-57.MP3",
+        "so I guess I need to ping him again.",
+    )
+    action.body = "Rob will follow up again with him about the old Salesforce email."
+    s = summary()
+    s.meta.source_files = ["R2026-09-21-09-45-57.MP3"]
+    text = s.to_text(actions=[action])
+    heading, _, said = text.partition("Said")
+    assert "Follow up on the Salesforce email" in heading
+    assert "Ping him" not in heading
+    assert "so I guess I need to ping him again." in said
+
+
+def test_role_change_is_not_summarized_as_only_ticket_triage() -> None:
+    """2026-09-21 09:45 mailed backlog trim / Claude repos as the meeting.
+
+    The call opened with the role change and more UA work. 75/25 is NOT in
+    the transcript (Whisper miss if it was spoken) -- do not invent it.
+    A synthetic transcript that DOES contain 75/25 must still lead with
+    the split, not ticket triage.
+    """
+    from autowork.summarize import (
+        MERGE_PROMPT,
+        lead_with_call_purpose,
+        load_summary_prompt,
+    )
+
+    prompt = load_summary_prompt()
+    assert "you asked me about my role" in prompt
+    assert "more UA work for you" in prompt
+    assert "time allotment" in prompt
+    assert "reason-for-the-call" in prompt
+    assert "75/25" in prompt
+    assert "not spoken" in prompt
+    assert "reason-for-the-call" in MERGE_PROMPT
+
+    real_opening = (
+        "Yeah, like you asked me about my role. "
+        "So yeah, I know that that would imply more UA work for you. "
+        "probably just continuing with my current my time allotment "
+        "and finishing things up. "
+        "most of them can just be unassigned and go back into the regular backlog"
+    )
+    assert "75" not in real_opening
+    assert "25" not in real_opening
+
+    buried = Summary(
+        headline=(
+            "The main outcome was to trim the backlog, review the three tickets "
+            "left for review, and keep the new technician-update / TrueContext "
+            "work scoped down while the role and workload split stayed under "
+            "discussion."
+        ),
+        topics=[
+            {
+                "label": "Backlog triage",
+                "summary": "Unassign first-column tickets back to the backlog.",
+            },
+            {
+                "label": "Role change and UA workload",
+                "summary": "Asked about the role; that implies more UA work.",
+            },
+        ],
+        decisions=[],
+        open_questions=[],
+    )
+    lead_with_call_purpose(buried, real_opening)
+    assert buried.topics[0]["label"] == "Role change and UA workload"
+    assert "role" in buried.headline.lower() or "UA" in buried.headline
+    assert not buried.headline.lower().startswith("the main outcome was to trim")
+    assert "75" not in buried.headline
+    assert "75" not in buried.topics[0]["summary"]
+
+    omitted = Summary(
+        headline="Trim the backlog",
+        topics=[{
+            "label": "Backlog triage",
+            "summary": "Walk the tickets and unassign most of them.",
+        }],
+        decisions=[],
+        open_questions=[],
+    )
+    lead_with_call_purpose(omitted, real_opening)
+    assert omitted.topics[0]["label"] == "Role change and UA workload"
+    assert "75" not in omitted.headline
+    rendered = omitted.to_markdown()
+    discussed = rendered.split("## Discussed", 1)[1]
+    assert discussed.index("Role change") < discussed.index("Backlog triage")
+
+    split_transcript = (
+        "Aurea is proposing a 75% 25% split in UA workload "
+        "because Rob's role is changing. Then we walked the tickets."
+    )
+    split_buried = Summary(
+        headline="Ticket triage and TrueContext repos",
+        topics=[
+            {"label": "Ticket triage", "summary": "Unassign the first column."},
+            {
+                "label": "75/25 UA workload split",
+                "summary": "Aurea proposed a 75/25 split as the role changes.",
+            },
+        ],
+        decisions=[],
+        open_questions=[],
+    )
+    lead_with_call_purpose(split_buried, split_transcript)
+    assert split_buried.topics[0]["label"] == "75/25 UA workload split"
+    assert "triage" not in split_buried.headline.lower()
 
 
 def test_empty_sections_are_omitted_not_left_as_empty_headings() -> None:

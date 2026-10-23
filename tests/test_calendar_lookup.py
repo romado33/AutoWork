@@ -44,6 +44,38 @@ def test_no_overlapping_event_omits() -> None:
     assert match_recording(start, 3.5, source=FakeCalendar([event])) is None
 
 
+def test_09_45_file_covers_a_10am_meeting_via_wall_clock() -> None:
+    """2026-09-21 10:00 Aurea call lived in R2026-09-21-09-45-57.
+
+    13 min of kept speech starting at offset 16:00. Looking up 09:45 + 13 min
+    misses 10:00. Last kept offset ~35 min overlaps the meeting.
+    """
+    from autowork.day import Contribution, calendar_duration_min
+
+    start = datetime(2026, 9, 21, 9, 45, 57)
+    event = CalendarEvent(
+        subject="Aurea UA workload",
+        start=datetime(2026, 9, 21, 10, 0),
+        end=datetime(2026, 9, 21, 11, 0),
+        attendees=("Rob Dods",),
+    )
+    cal = FakeCalendar([event])
+    assert match_recording(start, 13.0, source=cal) is None
+
+    contrib = Contribution(
+        source_file="R2026-09-21-09-45-57.MP3",
+        keep=True,
+        audio_minutes=13.0,
+        recorded_at="2026-09-21T09:45:57",
+        coverage_minutes=34.75,
+    )
+    assert calendar_duration_min(contrib) == 34.75
+    match = match_recording(start, calendar_duration_min(contrib), source=cal)
+    assert match is not None
+    assert match.subject == "Aurea UA workload"
+    assert match.start == datetime(2026, 9, 21, 10, 0)
+
+
 def test_two_overlapping_events_are_not_guessed() -> None:
     """A wrong meeting on a work summary is worse than none."""
     start = datetime(2026, 8, 26, 9, 4, 45)
