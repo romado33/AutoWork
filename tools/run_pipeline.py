@@ -5,6 +5,7 @@ Usage:
     python tools/run_pipeline.py                      # full run, ingest from the device
     python tools/run_pipeline.py --files audio/*.MP3   # skip ingest, use these files
     python tools/run_pipeline.py --no-email            # everything but the send
+    python tools/run_pipeline.py --resend              # ignore the send ledger
     python tools/run_pipeline.py --no-diarize          # faster, no speaker labels
     python tools/run_pipeline.py --dry-run             # gate only, upload nothing
 
@@ -55,6 +56,7 @@ from autowork.glossary import Glossary, GlossaryError  # noqa: E402
 from autowork.ingest import IngestError, ingest  # noqa: E402
 from autowork.llm import load_dotenv  # noqa: E402
 from autowork.mailer import MailError, default_recipient, send  # noqa: E402
+from autowork.send_ledger import SendLedger, SendLedgerError  # noqa: E402
 from autowork.prefilter import select  # noqa: E402
 from autowork.quality import assess, retain_intelligible, speaker_count_for_header  # noqa: E402
 from autowork.action import Status  # noqa: E402
@@ -71,6 +73,7 @@ from autowork.transcribe_cloud import (  # noqa: E402
 from autowork.day import (  # noqa: E402
     Contribution,
     DayError,
+    calendar_duration_min,
     clarify_markdown,
     date_from_filename,
     isoformat,
@@ -165,6 +168,7 @@ def note_contribution(
     speaker_count: int,
     excluded_because: str = "",
     forced: bool = False,
+    coverage_minutes: float = 0.0,
 ) -> str | None:
     """Persist this recording's day-summary contribution. Returns the date key."""
     stamp = SummaryMeta.from_filename(path.name).recorded_at
@@ -179,6 +183,7 @@ def note_contribution(
             recorded_at=isoformat(stamp),
             excluded_because=excluded_because,
             forced=forced and keep,
+            coverage_minutes=coverage_minutes if keep else 0.0,
         ),
     )
     return date_from_filename(path.name)
@@ -299,6 +304,11 @@ def main(argv: list[str] | None = None) -> int:
         help="one-off operator override: summarise even if personal or garbled",
     )
     parser.add_argument("--dry-run", action="store_true", help="gate only, no uploads")
+    parser.add_argument(
+        "--resend",
+        action="store_true",
+        help="email even if this source-file set is already in summaries/.sent.json",
+    )
     parser.add_argument("--to", default=None, help="summary recipient")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -477,11 +487,13 @@ def main(argv: list[str] | None = None) -> int:
                     return
 
             cached = "\n\n".join(s.text for s in cached_segments if s.text.strip())
+            last_end = max((s.end_sec for s in cached_segments), default=0.0)
             touch(note_contribution(
                 transcript_dir, path, keep=True, text=cached,
                 audio_minutes=sum(s.duration_sec for s in cached_segments) / 60,
                 speaker_count=speaker_max(cached_segments),
                 forced=args.force_keep,
+                coverage_minutes=last_end / 60,
             ))
 
             # Extract on the cached path too. Extraction is seconds and cents, and the
@@ -559,11 +571,13 @@ def main(argv: list[str] | None = None) -> int:
             ))
             return
 
+        last_end = max((s.end_sec for s in kept_segs), default=0.0)
         touch(note_contribution(
             transcript_dir, path, keep=True, text=joined_raw,
             audio_minutes=sum(s.duration_sec for s in kept_segs) / 60,
             speaker_count=speaker_max(kept_segs),
             forced=args.force_keep,
+            coverage_minutes=last_end / 60,
         ))
 
         # --- 3. extract into the review queue --------------------------------
@@ -615,7 +629,9 @@ def main(argv: list[str] | None = None) -> int:
         if contrib.recorded_datetime is None:
             matches[contrib.source_file] = None
             continue
-        matched = match_recording(contrib.recorded_datetime, contrib.audio_minutes)
+        matched = match_recording(
+            contrib.recorded_datetime, calendar_duration_min(contrib)
+        )
         matches[contrib.source_file] = matched
         if matched is not None:
             print(f"  calendar {contrib.source_file}: {matched.subject or '(no title)'} "
@@ -630,92 +646,124 @@ def main(argv: list[str] | None = None) -> int:
         if forced:
             convos = [Conversation(contribs=forced, group_key="force-keep")]
 
+    ledger = SendLedger(transcript_dir.parent / "summaries" / ".sent.json")
+
     for convo in convos:
         if not any(name in processed_names for name in convo.source_files):
             continue
         combined = convo.text
         if not combined.strip():
             continue
+        # Lock before summarise: the 13:42 duplicate was two overlapping
+        # processes that both summarised and both mailed before either wrote
+        # the ledger. Holding the lock through SMTP makes the second wait,
+        # then see the first write, and skip.
         try:
-            extra = FORCE_KEEP_PROMPT if args.force_keep else ""
-            summary = summarise(
-                combined,
-                recorded_at=convo.meta.recorded_at,
-                glossary=glossary,
-                require_intelligible=not args.force_keep,
-                extra_instructions=extra,
-            )
-        except SummaryError as exc:
-            print(f"\n{convo.source_files}: summary failed: {exc}", file=sys.stderr)
+            slot_cm = ledger.acquire(convo.source_files, resend=args.resend)
+        except SendLedgerError as exc:
+            print(f"  send ledger: {exc}", file=sys.stderr)
             failures += 1
             continue
+        with slot_cm as slot:
+            if not slot.allowed:
+                print(
+                    f"  already emailed {', '.join(convo.source_files)}; "
+                    "not sending again (pass --resend to override)"
+                )
+                continue
+            try:
+                extra = FORCE_KEEP_PROMPT if args.force_keep else ""
+                summary = summarise(
+                    combined,
+                    recorded_at=convo.meta.recorded_at,
+                    glossary=glossary,
+                    require_intelligible=not args.force_keep,
+                    extra_instructions=extra,
+                )
+            except SummaryError as exc:
+                print(f"\n{convo.source_files}: summary failed: {exc}", file=sys.stderr)
+                failures += 1
+                continue
 
-        summary.meta = convo.meta
-        summary.clarify_terms = glossary.unknown_proper_nouns(
-            combined, min_occurrences=2
-        )
-        summary.apply_glossary(glossary)
-        if args.force_keep:
-            convo_actions = []
-        else:
-            convo_actions = apply_glossary_all(
-                [
-                    a for a in pending
-                    if Path(a.provenance.source_audio).name in set(convo.source_files)
-                ],
-                glossary,
+            summary.meta = convo.meta
+            summary.clarify_terms = glossary.unknown_proper_nouns(
+                combined, min_occurrences=2
             )
+            summary.apply_glossary(glossary)
+            if args.force_keep:
+                convo_actions = []
+            else:
+                convo_actions = apply_glossary_all(
+                    [
+                        a for a in pending
+                        if Path(a.provenance.source_audio).name
+                        in set(convo.source_files)
+                    ],
+                    glossary,
+                )
 
-        stamp = summary.meta.date_only
-        time_bit = (
-            summary.meta.recorded_at.strftime("%H-%M")
-            if summary.meta.recorded_at else "unknown"
-        )
-        print(f"\nsummary {stamp} {time_bit}: {summary.headline}")
-        print(f"  {summary.backend}, {summary.elapsed_sec:.1f}s, "
-              f"{summary.input_tokens} in / {summary.output_tokens} out")
-        print(f"  files: {', '.join(convo.source_files)}")
-
-        summary_path = (
-            transcript_dir.parent / "summaries" / f"{stamp}-{time_bit}.md"
-        )
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(
-            summary.to_markdown(actions=convo_actions), encoding="utf-8"
-        )
-        print(f"  saved {summary_path}")
-        summarised += 1
-
-        if (
-            not args.force_keep
-            and not summary.topics
-            and not summary.decisions
-            and not convo_actions
-        ):
-            print("  garbled or empty: not emailing a fake meeting")
-            continue
-
-        if args.no_email:
-            print("  --no-email: not sending")
-            continue
-        if not recipient:
-            print("  no recipient (set SUMMARY_TO in .env); not sending", file=sys.stderr)
-            failures += 1
-            continue
-
-        if summary.meta.meeting_title:
-            subject = (
-                f"Meeting {stamp}: {summary.meta.meeting_title[:70]}"
+            stamp = summary.meta.date_only
+            time_bit = (
+                summary.meta.recorded_at.strftime("%H-%M")
+                if summary.meta.recorded_at else "unknown"
             )
-        else:
-            subject = f"Call {stamp} {time_bit.replace('-', ':')}: {summary.headline[:50]}"
-        body = summary.to_text(actions=convo_actions)
-        try:
-            print("  " + send(recipient, subject, body,
-                              html_body=summary.to_html(actions=convo_actions)))
-        except MailError as exc:
-            print(f"  email failed: {exc}", file=sys.stderr)
-            failures += 1
+            print(f"\nsummary {stamp} {time_bit}: {summary.headline}")
+            print(f"  {summary.backend}, {summary.elapsed_sec:.1f}s, "
+                  f"{summary.input_tokens} in / {summary.output_tokens} out")
+            print(f"  files: {', '.join(convo.source_files)}")
+
+            summary_path = (
+                transcript_dir.parent / "summaries" / f"{stamp}-{time_bit}.md"
+            )
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.write_text(
+                summary.to_markdown(actions=convo_actions), encoding="utf-8"
+            )
+            print(f"  saved {summary_path}")
+            summarised += 1
+
+            if (
+                not args.force_keep
+                and not summary.topics
+                and not summary.decisions
+                and not convo_actions
+            ):
+                print("  garbled or empty: not emailing a fake meeting")
+                continue
+
+            if args.no_email:
+                print("  --no-email: not sending")
+                continue
+            if not recipient:
+                print(
+                    "  no recipient (set SUMMARY_TO in .env); not sending",
+                    file=sys.stderr,
+                )
+                failures += 1
+                continue
+
+            if summary.meta.meeting_title:
+                subject = (
+                    f"Meeting {stamp}: {summary.meta.meeting_title[:70]}"
+                )
+            else:
+                subject = (
+                    f"Call {stamp} {time_bit.replace('-', ':')}: "
+                    f"{summary.headline[:50]}"
+                )
+            body = summary.to_text(actions=convo_actions)
+            try:
+                print("  " + send(
+                    recipient, subject, body,
+                    html_body=summary.to_html(actions=convo_actions),
+                ))
+                slot.record(subject)
+            except MailError as exc:
+                print(f"  email failed: {exc}", file=sys.stderr)
+                failures += 1
+            except SendLedgerError as exc:
+                print(f"  send ledger write failed: {exc}", file=sys.stderr)
+                failures += 1
 
     if summarised == 0 and failures == 0:
         return 0

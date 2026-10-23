@@ -43,6 +43,10 @@ class Contribution:
     # personal recordings sat here as keep=True and would have been merged into a
     # later work summary by whichever recording shared their Outlook event.
     forced: bool = False
+    # Wall-clock minutes from file start to the last kept speech offset.
+    # Distinct from audio_minutes (sum of kept speech). Needed so a 10:00
+    # meeting still matches a file that started at 09:45 with a quiet lead-in.
+    coverage_minutes: float = 0.0
 
     @property
     def recorded_datetime(self) -> datetime | None:
@@ -107,7 +111,21 @@ def load_contribution(path: Path) -> Contribution:
         # Absent in sidecars written before the override existed: an old keep is
         # an ordinary keep.
         forced=bool(raw.get("forced")),
+        coverage_minutes=float(raw.get("coverage_minutes") or 0.0),
     )
+
+
+def calendar_duration_min(contrib: Contribution) -> float:
+    """Outlook window length: wall-clock coverage, not summed speech.
+
+    2026-09-21 10:00 Aurea call sat in R2026-09-21-09-45-57. First kept
+    speech is at offset 16:00 (~10:02). Passing 13 min of speech looked up
+    09:45–09:58 and missed the 10:00 event. Last kept offset (~35 min) is
+    the coverage that overlaps the meeting.
+    """
+    if contrib.coverage_minutes > 0:
+        return contrib.coverage_minutes
+    return contrib.audio_minutes
 
 
 def load_kept_for_date(

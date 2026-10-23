@@ -258,6 +258,8 @@ def test_summary_prompt_drops_salad_and_keeps_named_follow_ups() -> None:
     assert "cell-tower" in text
     assert "Compress filler" in text or "not substance" in text
     assert "named object" in text.lower() or "who will do what" in text.lower()
+    assert "you asked me about my role" in text
+    assert "reason-for-the-call" in text
 
 
 def test_project_glossary_loads_okta_context() -> None:
@@ -269,6 +271,231 @@ def test_project_glossary_loads_okta_context() -> None:
     assert "authorization" in okta.about
     assert "Octo" in okta.variants
     assert "Okta" in g.summary_hint()
+
+
+def test_project_glossary_corrects_09_45_uberx_and_red_pill() -> None:
+    """2026-09-21 09:45: Whisper wrote UberX / Red Pill; emails kept them.
+
+    Operator: Salesforce and Huberto. Verbatim incident strings from the
+    cached transcript. 'Uber Expo' was model glue from 'UberX up', not a
+    spoken phrase -- still a variant so display-time rewrite catches it.
+    """
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    salesforce = next(t for t in g.terms if t.term == "Salesforce")
+    huberto = next(t for t in g.terms if t.term == "Huberto")
+    assert "CRM" in salesforce.about
+    assert "UberX" in salesforce.variants
+    assert "Uber Expo" in salesforce.variants
+    assert "Uber" in salesforce.variants
+    assert "person" in huberto.about
+    assert "Red Pill" in huberto.variants
+    assert "Roberto" in huberto.variants
+
+    text = (
+        "And that was all from an email from uh UberX up from a long time ago. "
+        "Um I sent what I had to Red Pill a couple weeks ago and I haven't heard back. "
+        "I'll paint Roberto on that today and he wrote that down. "
+        "the TrueContext sales course integration"
+    )
+    fixed, applied = g.correct(text)
+    assert "UberX" not in fixed
+    assert "Red Pill" not in fixed
+    assert "Roberto" not in fixed
+    assert "sales course" not in fixed
+    assert "Salesforce" in fixed
+    assert "Huberto" in fixed
+    assert "Salesforce" in applied
+    assert "Huberto" in applied
+
+    expo, expo_applied = g.correct("Ping him again about the Uber Expo email")
+    assert expo == "Ping him again about the Salesforce email"
+    assert "Salesforce" in expo_applied
+    assert "Salesforce" in g.summary_hint()
+    assert "Huberto" in g.summary_hint()
+
+
+def test_uber_and_red_pill_respect_word_boundaries() -> None:
+    """sit→CIT class: uber inside unrelated words must not become Salesforce."""
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    fixed, applied = g.correct(
+        "The number of tuberculosis cases sat on a red pillow."
+    )
+    assert "Salesforce" not in fixed
+    assert "Huberto" not in fixed
+    assert "tuberculosis" in fixed
+    assert "red pillow" in fixed
+    assert "Salesforce" not in applied
+    assert "Huberto" not in applied
+
+
+def test_rewrite_file_fixes_09_45_incident_strings(tmp_path) -> None:
+    """Cached re-send must run correct() so UberX / Red Pill leave the file."""
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    path = tmp_path / "R2026-09-21-09-45-57.md"
+    path.write_text(
+        "And that was all from an email from uh UberX up from a long time ago.\n"
+        "Um I sent what I had to Red Pill a couple weeks ago.\n",
+        encoding="utf-8",
+    )
+    applied = g.rewrite_file(path)
+    text = path.read_text(encoding="utf-8")
+    assert "Salesforce" in applied
+    assert "Huberto" in applied
+    assert "UberX" not in text
+    assert "Red Pill" not in text
+    assert "Salesforce" in text
+    assert "Huberto" in text
+    assert g.rewrite_file(path) == []
+
+
+def test_project_glossary_corrects_14_21_curve_and_s_v() -> None:
+    """2026-09-21 14:21: Whisper wrote Curve / S_V_; operator: Qrvey / S3.
+
+    Verbatim from transcripts/R2026-09-21-14-21-47.md. The 09:45 Aurea
+    file does not contain these misses. S_ three in the same recording
+    is the same intended word (lambda / event grid).
+    """
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    qrvey = next(t for t in g.terms if t.term == "Qrvey")
+    s3 = next(t for t in g.terms if t.term == "S3")
+    assert "analytics" in qrvey.about
+    assert "Curve" in qrvey.variants
+    assert "curve" in qrvey.variants
+    assert "object storage" in s3.about
+    assert "AWS" in s3.about
+    assert "S_V_" in s3.variants
+    assert "S_V" in s3.variants
+    assert "S_ three" in s3.variants
+
+    text = (
+        "I mean I'm pretty confident that that we can go ahead with the S_V_ "
+        "It's kind of like you said when you were hearing how we do with the S_V_ "
+        "But I don't know do you know like do we have company-wide access to Curve? Or "
+        "if they have something on S_ three, Claude mentioned some lambda"
+    )
+    fixed, applied = g.correct(text)
+    assert "S_V_" not in fixed
+    assert "S_V" not in fixed
+    assert "S_ three" not in fixed
+    assert "Curve" not in fixed
+    assert "S3" in fixed
+    assert "Qrvey" in fixed
+    assert "S3" in applied
+    assert "Qrvey" in applied
+    assert "go ahead with the S3 " in fixed
+    assert "access to Qrvey?" in fixed
+    assert "something on S3," in fixed
+
+
+def test_curve_and_s_v_respect_word_boundaries() -> None:
+    """sit→CIT class: curve inside curved / curveball must not become Qrvey."""
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    fixed, applied = g.correct(
+        "They put a cell chip up where it's like curved. "
+        "Curveball to the elbow, buddy."
+    )
+    assert "Qrvey" not in fixed
+    assert "curved" in fixed
+    assert "Curveball" in fixed
+    assert "Qrvey" not in applied
+    assert "S3" not in applied
+
+
+def test_rewrite_file_fixes_14_21_incident_strings(tmp_path) -> None:
+    """Cached re-send must run correct() so Curve / S_V_ leave the file."""
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    path = tmp_path / "R2026-09-21-14-21-47.md"
+    path.write_text(
+        "I mean I'm pretty confident that that we can go ahead with the S_V_ "
+        "It's kind of like you said when you were hearing how we do with the S_V_\n"
+        "But I don't know do you know like do we have company-wide access to Curve? Or\n",
+        encoding="utf-8",
+    )
+    applied = g.rewrite_file(path)
+    text = path.read_text(encoding="utf-8")
+    assert "Qrvey" in applied
+    assert "S3" in applied
+    assert "Curve" not in text
+    assert "S_V_" not in text
+    assert "Qrvey" in text
+    assert "S3" in text
+    assert g.rewrite_file(path) == []
+
+
+def test_project_glossary_corrects_14_21_nusoft() -> None:
+    """2026-09-21 14:21: Whisper wrote NuSoft; operator: MuleSoft.
+
+    Verbatim from transcripts/R2026-09-21-14-21-47.md. Possessive
+    NuSoft's must become MuleSoft's, not a stranded 's.
+    """
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    mulesoft = next(t for t in g.terms if t.term == "MuleSoft")
+    assert "integration" in mulesoft.about
+    assert "iPaaS" in mulesoft.about
+    assert "NuSoft" in mulesoft.variants
+
+    text = (
+        "Yeah, I actually looked into it, the C_I_T_ if we can move that "
+        "over to NuSoft, the scheduling so it wouldn't run on my laptop, "
+        "on NuSoft's schedule so it doesn't run my Python scripts, right."
+    )
+    fixed, applied = g.correct(text)
+    assert "NuSoft" not in fixed
+    assert "MuleSoft" in fixed
+    assert "MuleSoft's" in fixed
+    assert "move that over to MuleSoft," in fixed
+    assert "on MuleSoft's schedule" in fixed
+    assert "MuleSoft" in applied
+
+
+def test_nusoft_respects_word_boundaries() -> None:
+    """sit→CIT class: unrelated -soft words must not become MuleSoft."""
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    fixed, applied = g.correct(
+        "Microsoft shipped the software on a softer timeline."
+    )
+    assert "MuleSoft" not in fixed
+    assert "Microsoft" in fixed
+    assert "software" in fixed
+    assert "softer" in fixed
+    assert "MuleSoft" not in applied
+
+
+def test_rewrite_file_fixes_14_21_nusoft_incident_strings(tmp_path) -> None:
+    """Cached re-send must run correct() so NuSoft leaves the file."""
+    from pathlib import Path
+
+    g = Glossary.load(Path(__file__).resolve().parent.parent / "config" / "glossary.yml")
+    path = tmp_path / "R2026-09-21-14-21-47.md"
+    path.write_text(
+        "Yeah, I actually looked into it, the C_I_T_ if we can move that "
+        "over to NuSoft, the scheduling so it wouldn't run on my laptop, "
+        "on NuSoft's schedule so it doesn't run my Python scripts, right.\n",
+        encoding="utf-8",
+    )
+    applied = g.rewrite_file(path)
+    text = path.read_text(encoding="utf-8")
+    assert "MuleSoft" in applied
+    assert "NuSoft" not in text
+    assert "MuleSoft" in text
+    assert "MuleSoft's" in text
+    assert g.rewrite_file(path) == []
 
 
 # --- clarify loop ----------------------------------------------------------------

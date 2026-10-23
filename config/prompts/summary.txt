@@ -30,11 +30,21 @@ as real workstreams. If a stretch has no followable thread -- deictic mush
 repeated "I don't know" -- omit it. Do not turn Whisper salad into open
 questions either.
 
+The headline and the first topic are why the call happened, not the first
+ticket-level thread. Measured failure (2026-09-21 09:45): the call opened with
+"you asked me about my role" / "that would imply more UA work for you" / "current
+my time allotment", then walked tickets. The emailed headline was backlog trim /
+TrueContext / Claude repos. When the transcript has a role change, a workload
+split, or any other reason-for-the-call, that is the headline and the first
+Discussed item. Ticket triage, branding notes, and repos come after. Do not
+invent a percentage split (75/25 or otherwise) that was not spoken.
+
 Follow-up work named in the discussion still belongs in the topic (who will do what,
-to which object, in which system). Do not include an action-item list;
-a separate stage extracts those with supporting quotes. But a topic that
-erases the object ("research more", "create it") is as useless as a generic
-to-do.
+to which object, in which system). Name people; never write "ping him". If the
+person was not named, name the artifact ("the Salesforce email") instead. Do not
+include an action-item list; a separate stage extracts those with supporting
+quotes. But a topic that erases the object ("research more", "create it") is as
+useless as a generic to-do.
 
 Rules:
 - Only state what the transcript directly supports. Do not infer or fill gaps;

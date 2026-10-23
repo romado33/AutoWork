@@ -192,6 +192,34 @@ def test_create_it_title_is_rejected_without_a_named_artifact() -> None:
     assert c.rejected_because == "title object is a pronoun with no named artifact"
 
 
+def test_ping_him_without_an_artifact_is_rejected() -> None:
+    """2026-09-21 09:45: 'Ping him again' names no person and no artifact."""
+    quote = "so I guess I need to ping him again about it later today"
+    c = candidate(
+        title="Ping him again",
+        body="Rob will ping him again.",
+        quote=quote,
+        target_system="email",
+        action_type="message",
+    )
+    ground([c], quote + ".", config(target_systems=("email", "notes", "cit")))
+    assert c.rejected_because == "person is a pronoun with no named artifact"
+
+
+def test_ping_him_about_a_named_artifact_is_kept() -> None:
+    """The Salesforce follow-up is real work; the pronoun is a display problem."""
+    quote = "so I guess I need to ping him again about the Salesforce email"
+    c = candidate(
+        title="Ping him again about the Salesforce email",
+        body="Follow up on the Salesforce email.",
+        quote=quote,
+        target_system="email",
+        action_type="message",
+    )
+    ground([c], quote + ".", config(target_systems=("email", "notes", "cit")))
+    assert c.rejected_because is None
+
+
 def test_research_further_without_an_object_is_rejected() -> None:
     """2026-09-03 12:10 queued 'Research further before giving input' from a
     garbled stretch ('I need to research more... before I can give any meaningful
@@ -270,6 +298,8 @@ def test_extract_prompt_requires_a_named_object() -> None:
     assert "Create it from the backlog tool" in SYSTEM_PROMPT
     assert "Research further before giving input" in SYSTEM_PROMPT
     assert "named the object" in SYSTEM_PROMPT.lower()
+    assert "Ping him again" in SYSTEM_PROMPT
+    assert "Salesforce email" in SYSTEM_PROMPT
 
 
 def test_empty_action_list_is_valid_not_an_error() -> None:

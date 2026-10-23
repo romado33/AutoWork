@@ -20,6 +20,7 @@ mail provider sees the same content. The transcript and the audio are what stay 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +42,57 @@ def _action_origin(action: object) -> str:
     if stamp is None:
         return name or "unknown recording"
     return f"{stamp.strftime('%A %d %B %Y, %H:%M')} · {name}"
+
+
+# Body prefixes written by extract.to_action_record. Queue identity stays the
+# grounding quote; these only decide which email section an item appears in.
+_OWNER_PREFIXES = (
+    ("[someone else committed to this] ", "other"),
+    ("[speaker attribution unclear] ", "unclear"),
+)
+
+
+def display_action_title(title: str) -> str:
+    """Email heading only. Queue identity stays the grounding quote.
+
+    2026-09-21 09:45 queued 'Ping him again about the Uber Expo email'
+    (Whisper miss for Salesforce). The artifact is named; the person is a
+    pronoun. Show the artifact.
+    """
+    rewritten = re.sub(
+        r"^(ping|ask|email|tell|nudge|follow\s+up with)\s+"
+        r"(him|her|them)\s+(again\s+)?(about|regarding|on)\s+",
+        "Follow up on ",
+        (title or "").strip(),
+        count=1,
+        flags=re.I,
+    )
+    return rewritten
+
+
+def _action_owner_kind(action: object) -> str:
+    body = getattr(action, "body", "") or ""
+    for prefix, kind in _OWNER_PREFIXES:
+        if body.startswith(prefix):
+            return kind
+    return "me"
+
+
+def _action_what(action: object) -> str:
+    body = getattr(action, "body", "") or ""
+    for prefix, _kind in _OWNER_PREFIXES:
+        if body.startswith(prefix):
+            return body[len(prefix):].strip()
+    return body.strip()
+
+
+def _followup_who(action: object) -> str:
+    kind = _action_owner_kind(action)
+    if kind == "other":
+        return "Someone else (Rob is tracking)"
+    if kind == "unclear":
+        return "Unclear — review the quote"
+    return "Rob"
 
 
 DEFAULT_BACKEND = "openai:gpt-5.4-mini"
@@ -125,6 +177,15 @@ as real workstreams. If a stretch has no followable thread -- deictic mush
 repeated "I don't know" -- omit it. Do not turn Whisper salad into open
 questions either.
 
+The headline and the first topic are why the call happened, not the first
+ticket-level thread. Measured failure (2026-09-21 09:45): the call opened with
+"you asked me about my role" / "that would imply more UA work for you" / "current
+my time allotment", then walked tickets. The emailed headline was backlog trim /
+TrueContext / Claude repos. When the transcript has a role change, a workload
+split, or any other reason-for-the-call, that is the headline and the first
+Discussed item. Ticket triage, branding notes, and repos come after. Do not
+invent a percentage split (75/25 or otherwise) that was not spoken.
+
 Follow-up work named in the discussion still belongs in the topic (who will do what,
 to which object, in which system). Do not include an action-item list;
 a separate stage extracts those with supporting quotes. But a topic that
@@ -182,6 +243,10 @@ The parts are sequential slices of the same discussion, so the same topic will o
 appear in more than one part. Merge those into one entry rather than repeating them. \
 Keep the specifics -- numbers, names, systems. Drop nothing substantive. \
 Do not promote a garbled stretch into a topic.
+
+The headline and the first topic stay the reason-for-the-call (role change, \
+workload split, why we met) when any part has one. Ticket triage must not \
+become the headline. Do not invent a percentage split that was not in a part.
 
 Return JSON in the same shape.
 """
@@ -398,26 +463,63 @@ class Summary:
                 earlier.append(action)
         return collapse_same_recording(today), collapse_same_recording(earlier)
 
+    def partition_followups(
+        self, actions: list | None
+    ) -> tuple[list, list, list]:
+        """This-recording Rob items, this-recording others, earlier recordings.
+
+        Rob's next actions are the first-class email content. Someone-else
+        commitments stay visible but do not lead. Unclear attribution stays
+        with Rob's list so the operator reviews the quote.
+        """
+        today, earlier = self.partition_actions(actions)
+        mine = [a for a in today if _action_owner_kind(a) != "other"]
+        others = [a for a in today if _action_owner_kind(a) == "other"]
+        return mine, others, earlier
+
     def to_markdown(self, actions: list | None = None) -> str:
         lines = [f"# {self.headline}", ""]
         lines += [f"- {line}" for line in self.meta_lines()]
         lines.append("")
 
-        today, earlier = self.partition_actions(actions)
-        if today:
-            lines += [f"## To do ({len(today)})", ""]
-            for action in today:
+        mine, others, earlier = self.partition_followups(actions)
+        if mine:
+            lines += [
+                f"## Rob's follow-ups ({len(mine)})",
+                "",
+                "Next actions for Rob from this recording. Nothing has been executed.",
+                "",
+            ]
+            for action in mine:
                 lines += [
-                    f"### {action.title}",
+                    f"### {display_action_title(action.title)}",
                     "",
-                    action.body,
-                    "",
-                    f"- Target: `{action.target_system}` / {action.action_type.value}"
-                    f" / confidence {action.confidence:.2f}",
+                    f"- Who: {_followup_who(action)}",
+                    f"- What: {_action_what(action)}",
+                    f"- System: `{action.target_system}` · {action.action_type.value}"
+                    f" · confidence {action.confidence:.2f}",
                     f'- Said: _"{action.provenance.transcript_excerpt}"_',
                     "",
                 ]
-            lines += ["_Not executed. Review with `scripts\\review-ui.bat` (or `scripts\\review.bat`)._", ""]
+            lines += ["_Review with `scripts\\review-ui.bat` (or `scripts\\review.bat`)._", ""]
+        if others:
+            lines += [
+                f"## Others will do ({len(others)})",
+                "",
+                "Spoken commitments that are not Rob's to execute.",
+                "",
+            ]
+            for action in others:
+                lines += [
+                    f"### {display_action_title(action.title)}",
+                    "",
+                    f"- Who: {_followup_who(action)}",
+                    f"- What: {_action_what(action)}",
+                    f"- System: `{action.target_system}` · {action.action_type.value}"
+                    f" · confidence {action.confidence:.2f}",
+                    f'- Said: _"{action.provenance.transcript_excerpt}"_',
+                    "",
+                ]
 
         if self.topics:
             lines += ["## Discussed", ""]
@@ -455,7 +557,7 @@ class Summary:
                     f'- Said: _"{action.provenance.transcript_excerpt}"_',
                     "",
                 ]
-            if not today:
+            if not mine:
                 lines += ["_Not executed. Review with `scripts\\review-ui.bat` (or `scripts\\review.bat`)._", ""]
 
         if self.clarify_terms and self._has_discussion():
@@ -496,23 +598,55 @@ class Summary:
         if self.note:
             parts.append(f"<p style='color:#a60'><b>Note:</b> {esc(self.note)}</p>")
 
-        today, earlier = self.partition_actions(actions)
-        if today:
-            parts.append(f"<h3>To do ({len(today)})</h3><ol>")
-            for action in today:
+        mine, others, earlier = self.partition_followups(actions)
+        if mine:
+            parts.append(
+                f"<h3>Rob's follow-ups ({len(mine)})</h3>"
+                "<p>Next actions for Rob from this recording. "
+                "Nothing has been executed.</p><ol>"
+            )
+            for action in mine:
                 parts.append(
-                    f"<li style='margin-bottom:10px'><b>{esc(action.title)}</b><br>"
-                    f"{esc(action.body)}<br>"
-                    f"<span style='color:#777;font-size:12px'>"
-                    f"{esc(action.target_system)} / {esc(action.action_type.value)} / "
-                    f"confidence {action.confidence:.2f}</span><br>"
-                    f"<i style='color:#555'>said: “{esc(action.provenance.transcript_excerpt)}”</i></li>"
+                    f"<li style='margin-bottom:14px'><b>{esc(display_action_title(action.title))}</b>"
+                    "<table style='font-size:13px;border-spacing:0;margin-top:4px'>"
+                    f"<tr><td style='padding-right:10px'><b>Who</b></td>"
+                    f"<td>{esc(_followup_who(action))}</td></tr>"
+                    f"<tr><td style='padding-right:10px'><b>What</b></td>"
+                    f"<td>{esc(_action_what(action))}</td></tr>"
+                    f"<tr><td style='padding-right:10px'><b>System</b></td>"
+                    f"<td>{esc(action.target_system)} · {esc(action.action_type.value)} "
+                    f"· confidence {action.confidence:.2f}</td></tr>"
+                    f"<tr><td style='padding-right:10px'><b>Said</b></td>"
+                    f"<td><i>“{esc(action.provenance.transcript_excerpt)}”</i></td></tr>"
+                    "</table></li>"
                 )
             parts.append(
-                "</ol><p style='color:#777;font-size:12px'>None of these have been "
-                "executed. Review with <code>scripts\\review-ui.bat</code> "
+                "</ol><p style='color:#777;font-size:12px'>Review with "
+                "<code>scripts\\review-ui.bat</code> "
                 "(or <code>scripts\\review.bat</code>).</p>"
             )
+        if others:
+            parts.append(
+                f"<h3>Others will do ({len(others)})</h3>"
+                "<p style='color:#777;font-size:12px'>Spoken commitments that "
+                "are not Rob's to execute.</p><ol>"
+            )
+            for action in others:
+                parts.append(
+                    f"<li style='margin-bottom:14px'><b>{esc(display_action_title(action.title))}</b>"
+                    "<table style='font-size:13px;border-spacing:0;margin-top:4px'>"
+                    f"<tr><td style='padding-right:10px'><b>Who</b></td>"
+                    f"<td>{esc(_followup_who(action))}</td></tr>"
+                    f"<tr><td style='padding-right:10px'><b>What</b></td>"
+                    f"<td>{esc(_action_what(action))}</td></tr>"
+                    f"<tr><td style='padding-right:10px'><b>System</b></td>"
+                    f"<td>{esc(action.target_system)} · {esc(action.action_type.value)} "
+                    f"· confidence {action.confidence:.2f}</td></tr>"
+                    f"<tr><td style='padding-right:10px'><b>Said</b></td>"
+                    f"<td><i>“{esc(action.provenance.transcript_excerpt)}”</i></td></tr>"
+                    "</table></li>"
+                )
+            parts.append("</ol>")
 
         if self.topics:
             parts.append("<h3>Discussed</h3><ul>")
@@ -554,7 +688,7 @@ class Summary:
                     f"<i style='color:#555'>said: “{esc(action.provenance.transcript_excerpt)}”</i></li>"
                 )
             parts.append("</ol>")
-            if not today:
+            if not mine:
                 parts.append(
                     "<p style='color:#777;font-size:12px'>None of these have been "
                     "executed. Review with <code>scripts\\review-ui.bat</code> "
@@ -611,25 +745,32 @@ class Summary:
         """Plain-text mail body. Must be readable without markdown rendering.
 
         `actions` are pending items from the review queue. Only those whose source
-        recording is in this summary's source_files appear under TO DO. The rest go
-        in a labelled earlier-recordings section so one meeting's headline does not
-        absorb another day's commitments.
+        recording is in this summary's source_files appear under ROB'S FOLLOW-UPS.
+        The rest go in a labelled earlier-recordings section so one meeting's
+        headline does not absorb another day's commitments.
         """
         lines = [f"TOPIC       {self.headline}", *self.meta_lines(), ""]
         if self.note:
             lines += [f"NOTE: {self.note}", ""]
 
-        today, earlier = self.partition_actions(actions)
-        if today:
-            lines += ["=" * 68, f"TO DO ({len(today)})", "=" * 68, ""]
-            for index, action in enumerate(today, start=1):
-                lines.append(f"{index}. {action.title}")
-                lines.append(f"   {action.body}")
+        mine, others, earlier = self.partition_followups(actions)
+        if mine:
+            lines += [
+                "=" * 68,
+                f"ROB'S FOLLOW-UPS ({len(mine)})",
+                "=" * 68,
+                "Next actions for Rob from this recording. Nothing has been executed.",
+                "",
+            ]
+            for index, action in enumerate(mine, start=1):
+                lines.append(f"{index}. {display_action_title(action.title)}")
+                lines.append(f"   Who     {_followup_who(action)}")
+                lines.append(f"   What    {_action_what(action)}")
                 lines.append(
-                    f"   target: {action.target_system} / "
-                    f"{action.action_type.value} / confidence {action.confidence:.2f}"
+                    f"   System  {action.target_system} · "
+                    f"{action.action_type.value} · confidence {action.confidence:.2f}"
                 )
-                lines.append(f'   said: "{action.provenance.transcript_excerpt}"')
+                lines.append(f'   Said    "{action.provenance.transcript_excerpt}"')
                 lines.append("")
             lines += [
                 "None of these have been executed. Review with:",
@@ -637,6 +778,24 @@ class Summary:
                 "  scripts\\review.bat",
                 "",
             ]
+        if others:
+            lines += [
+                "=" * 68,
+                f"OTHERS WILL DO ({len(others)})",
+                "=" * 68,
+                "Spoken commitments that are not Rob's to execute.",
+                "",
+            ]
+            for index, action in enumerate(others, start=1):
+                lines.append(f"{index}. {display_action_title(action.title)}")
+                lines.append(f"   Who     {_followup_who(action)}")
+                lines.append(f"   What    {_action_what(action)}")
+                lines.append(
+                    f"   System  {action.target_system} · "
+                    f"{action.action_type.value} · confidence {action.confidence:.2f}"
+                )
+                lines.append(f'   Said    "{action.provenance.transcript_excerpt}"')
+                lines.append("")
 
         if self.topics:
             lines += ["=" * 68, "DISCUSSED", "=" * 68, ""]
@@ -672,7 +831,7 @@ class Summary:
                 )
                 lines.append(f'   said: "{action.provenance.transcript_excerpt}"')
                 lines.append("")
-            if not today:
+            if not mine:
                 lines += [
                     "None of these have been executed. Review with:",
                     "  scripts\\review-ui.bat",
@@ -724,6 +883,68 @@ def _ask(backend: Backend, prompt: str) -> tuple[dict, float, int | None, int | 
     if not isinstance(data, dict):
         raise SummaryError(f"expected a JSON object, got {type(data).__name__}")
     return data, completion.elapsed_sec, completion.input_tokens, completion.output_tokens
+
+
+# 2026-09-21 09:45: the call opened with these strings; emails led with backlog
+# trim. Used only to detect that a reason-for-the-call was spoken -- never to
+# invent a 75/25 split that Whisper did not write.
+_ROLE_WORKLOAD_CUES = (
+    "you asked me about my role",
+    "more UA work for you",
+    "time allotment",
+)
+_PURPOSE_TOPIC = re.compile(
+    r"\b(role|ua work|workload|time allotment|75\s*/\s*25|75\s*percent|split)\b",
+    re.I,
+)
+_TICKET_ONLY_HEADLINE = re.compile(
+    r"\b(backlog|ticket|triage|unassign|claude repo|truecontext)\b",
+    re.I,
+)
+
+
+def lead_with_call_purpose(summary: Summary, transcript: str) -> None:
+    """Put why-we-met first when the transcript has it.
+
+    Reorders a role/workload topic the model already wrote, or prepends a
+    grounded reminder from the verbatim 09:45 cues. Does not invent a
+    percentage split that is not in the transcript.
+    """
+    hay = _normalise_for_matching(transcript)
+    has_role = any(_normalise_for_matching(cue) in hay for cue in _ROLE_WORKLOAD_CUES)
+    has_split = bool(re.search(r"\b75\b.*\b25\b|\b25\b.*\b75\b", hay))
+    if not has_role and not has_split:
+        return
+
+    purpose = [t for t in summary.topics if _PURPOSE_TOPIC.search(
+        f"{t.get('label', '')} {t.get('summary', '')}"
+    )]
+    rest = [t for t in summary.topics if t not in purpose]
+    if purpose:
+        summary.topics = purpose + rest
+        lead = re.split(r"[,.;]|\bwhile\b", summary.headline, maxsplit=1)[0]
+        if _TICKET_ONLY_HEADLINE.search(lead) or not _PURPOSE_TOPIC.search(lead):
+            summary.headline = purpose[0].get("label") or summary.headline
+        return
+
+    if not has_role:
+        return
+    summary.topics.insert(
+        0,
+        {
+            "label": "Role change and UA workload",
+            "summary": (
+                "The conversation opened with a question about the speaker's role "
+                "and that this would imply more UA work. Time allotment and whether "
+                "that load is realistic for one person were still being worked out."
+            ),
+        },
+    )
+    if not _PURPOSE_TOPIC.search(summary.headline):
+        summary.headline = (
+            "Role is changing and that implies more UA work; "
+            "ticket walk-through followed"
+        )
 
 
 def summarise(
@@ -796,6 +1017,7 @@ def summarise(
         tokens_out += tout or 0
 
     summary = Summary.from_dict(merged)
+    lead_with_call_purpose(summary, text)
     summary.ground(text)
     summary.backend = f"{backend.name}:{backend.model}"
     summary.elapsed_sec = elapsed

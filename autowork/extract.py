@@ -134,12 +134,20 @@ more... before I can give any meaningful input" in a garbled stretch.
   - a title whose object is a pronoun. Measured failure (2026-09-03 11:10): \
 "Create it from the backlog tool" -- the quote was about a placeholder Epic \
 in Salesforce; the title did not say so.
+  - a title whose person is a pronoun and that names no artifact ("Ping him \
+again"). Measured display failure (2026-09-21 09:45): "Ping him again about \
+the Salesforce email" -- the quote was "so I guess I need to ping him again." \
+Name the artifact ("Follow up on the Salesforce email"), never \
+"him"/"her"/"them". If the transcript never names the person, still name \
+the artifact and the system.
 
 Title and body must name the artifact and the system: "Create a Salesforce \
 placeholder Epic when there are no linked accounts", not "Create it". \
 "Look for another way to capture mobile-app usage data; current capture is \
 not activated", not "Explore another way to capture app adoption data" if \
-the spoken object was more specific.
+the spoken object was more specific. "Follow up on the Salesforce email", \
+not "Ping him again". Body is who will do what, to which object, in which \
+system -- use a name, not a pronoun.
 
 The transcript comes from a pocket microphone and may contain transcription errors. \
 If a passage is garbled, do not guess at what it meant. Skip it.
@@ -464,6 +472,22 @@ def nonspecific_action_reason(title: str, body: str) -> str | None:
         r"\b(create|update|send|share|add|fix|move)\s+it\b", title, re.I
     ):
         return "title object is a pronoun with no named artifact"
+    if re.search(
+        r"\b(ping|ask|tell|call|nudge|email)\s+(him|her|them)\b", title, re.I
+    ):
+        rest = re.sub(
+            r"\b(ping|ask|tell|call|nudge|email|again|about|regarding|on|"
+            r"him|her|them)\b",
+            " ",
+            title,
+            flags=re.I,
+        )
+        tokens = [
+            w for w in re.findall(r"[a-z0-9']+", rest.lower())
+            if w not in _TITLE_STOP and w not in _VAGUE_WORK_WORDS
+        ]
+        if not tokens:
+            return "person is a pronoun with no named artifact"
     if re.match(r"^(research|do more research|look into it)\b", title.strip(), re.I):
         tokens = [
             w for w in re.findall(r"[a-z0-9']+", f"{title} {body}".lower())

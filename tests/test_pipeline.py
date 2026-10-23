@@ -73,6 +73,7 @@ def run(monkeypatch, tmp_path):
     exception (0x80010001) for every run.
     """
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("SUMMARY_TO", "test@example.com")
     monkeypatch.setattr(run_pipeline, "classify", stub_classify)
     monkeypatch.setattr(run_pipeline, "match_recording", lambda *a, **k: None)
 
@@ -83,7 +84,12 @@ def run(monkeypatch, tmp_path):
 
     def stub_summarise(text: str, *_a, **_k) -> Summary:
         summarised.append(text)
-        return Summary(headline="stub", topics=[], decisions=[], open_questions=[])
+        return Summary(
+            headline="stub",
+            topics=[{"label": "Work", "summary": "Access review."}],
+            decisions=[],
+            open_questions=[],
+        )
 
     monkeypatch.setattr(run_pipeline, "summarise", stub_summarise)
     sent: list = []
@@ -246,3 +252,25 @@ def test_a_forced_recording_does_not_return_on_a_later_normal_run(
     assert len(run.summarised) == 2
     assert "Okta access review" in run.summarised[1]
     assert "pizza" not in run.summarised[1]
+
+
+def test_second_run_does_not_email_the_same_sources(run) -> None:
+    """USB re-run of the same recording must not mail a second copy.
+
+    summaries/.sent.json is keyed by the source-file set. The 13:42
+    duplicate happened because that ledger was never consulted.
+    """
+    audio = make_recording(run, "R2026-09-21-09-45-57", WORK)
+
+    assert run("--files", str(audio), "--no-extract") == 0
+    assert len(run.sent) == 1
+    assert run("--files", str(audio), "--no-extract") == 0
+    assert len(run.sent) == 1
+
+
+def test_resend_emails_an_already_sent_conversation(run) -> None:
+    audio = make_recording(run, "R2026-09-21-09-45-57", WORK)
+
+    assert run("--files", str(audio), "--no-extract") == 0
+    assert run("--files", str(audio), "--no-extract", "--resend") == 0
+    assert len(run.sent) == 2

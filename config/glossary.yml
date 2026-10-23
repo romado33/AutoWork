@@ -39,6 +39,19 @@ terms:
   - term: Andrew
     tier: correct
     variants: []
+  - term: Natalie
+    tier: correct
+    variants: []
+    # Named in the 2026-09-21 09:45 recording (workflow/icon documentation).
+  - term: Huberto
+    tier: correct
+    about: [person]
+    # 2026-09-21 09:45: operator named Huberto. Whisper wrote 'Red Pill'
+    # ("I sent what I had to Red Pill a couple weeks ago") and 'Roberto'
+    # ("I'll paint Roberto on that today") for the same follow-up. Roberto
+    # is the near-miss; Red Pill is the wild miss. Emails treated both as
+    # real names. Word-boundary correct() will not rewrite 'red pillow'.
+    variants: [Red Pill, Roberto]
   # - term: <colleague>
   #   tier: prompt
   #   variants: [<what Whisper heard instead>]
@@ -130,10 +143,23 @@ terms:
     variants: [Jeera, Gyra, Jera]
   - term: Salesforce
     tier: prompt
-    variants: [Sales Force, Excel force, Excel Force]
+    about: [CRM]
+    # 2026-09-21 09:45: 'an email from uh UberX up from a long time ago' and
+    # 'TrueContext sales course integration' in the same branding/CRM thread.
+    # Emails then treated 'Uber Expo' as a real name (model glue from
+    # 'UberX up'). Operator: Salesforce. Variants stay on the correct() pass
+    # -- do not add them to the Whisper prompt; priming low-signal audio
+    # made hallucinations worse when measured. Word-boundary correct() will
+    # not rewrite uber inside unrelated words (number, tuberculosis).
+    variants: [Sales Force, Excel force, Excel Force, Uber Expo, UberX, Uber, sales course]
   - term: Confluence
     tier: correct
     variants: []
+  - term: Slack
+    tier: correct
+    variants: []
+    about: [chat, channels, messages]
+    # Named in the 2026-09-21 09:45 recording (Jira / Confluence / Slack lookup).
   - term: ARR
     tier: correct
     variants: [A.R.R., are are]
@@ -225,6 +251,37 @@ terms:
     tier: correct
     variants: [User Pilot, user product]
     about: [in-app guidance, web portal clicks]
+  - term: Qrvey
+    tier: correct
+    about: [analytics, dashboards, BI]
+    # 2026-09-21 14:21: 'do we have company-wide access to Curve?' in the
+    # S3 / pipeline / BI discussion. Operator: Qrvey. 'curve' is a real
+    # English word (learning curve, baseball pitch), so this rewrite is a
+    # domain bet like 'forums' -> 'forms': in this corpus the standalone
+    # form is Qrvey. Word-boundary correct() will not rewrite curved or
+    # curveball. A later sports recording said 'that's a curve' -- do not
+    # treat that file as this miss. Variants stay on the correct() pass;
+    # do not prime Whisper.
+    variants: [Curve, curve]
+  - term: S3
+    tier: correct
+    about: [object storage, AWS]
+    # 2026-09-21 14:21: Whisper wrote 'S_V_' ("go ahead with the S_V_")
+    # and 'S_ three' ("something on S_ three, Claude mentioned some
+    # lambda"). Operator: S3. The trailing underscore is Whisper's
+    # letter-spacing (same family as C_I_T_, A_P_I_). S_V_ must be listed
+    # so correct() does not leave S3_. S-V and SV were not observed.
+    variants: [S_V_, S_V, S_ three]
+  - term: MuleSoft
+    tier: correct
+    about: [integration, iPaaS]
+    # 2026-09-21 14:21: 'move that over to NuSoft' and 'on NuSoft's schedule'
+    # in the CIT / scheduling discussion. Operator: MuleSoft. Word-boundary
+    # correct() matches NuSoft and leaves NuSoft's as MuleSoft's; it will
+    # not rewrite software, Microsoft, or other -soft words. Nu Soft was
+    # not observed. Variants stay on the correct() pass; do not prime
+    # Whisper.
+    variants: [NuSoft]
   - term: Satish
     tier: correct
     variants: []
